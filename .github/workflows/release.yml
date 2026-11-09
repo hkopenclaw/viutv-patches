@@ -38,6 +38,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Build patches bundle
+              env:
+                # settings.gradle.kts reads GITHUB_TOKEN from the environment to authenticate
+                # to the MorpheApp GitHub Packages registry. GITHUB_TOKEN is not a default
+                # env var in GitHub Actions, so it must be passed explicitly here, otherwise
+                # the Gradle registry password is null and the plugin cannot be resolved.
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./gradlew :patches:buildAndroid --no-daemon
 
       - name: Create release
