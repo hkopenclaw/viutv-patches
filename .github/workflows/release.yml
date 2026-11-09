@@ -20,6 +20,9 @@ jobs:
     name: Release
     permissions:
       contents: write
+      # 讀 MorpheApp 嘅 GitHub Packages registry（攞 app.morphe.patches plugin），
+      # 無呢個權限，GITHUB_TOKEN 讀唔到嗰個 registry，Gradle 會報 plugin not found。
+      packages: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
