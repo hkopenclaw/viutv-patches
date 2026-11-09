@@ -1,0 +1,24 @@
+# 最簡 version catalog，照抄 MorpheApp/morphe-patches 官方 repo 同期嘅版本。
+# 如果官方 repo 之後升級咗 morphe-patcher / morphe-patches-library，
+# 呢度要跟住升級。
+
+[versions]
+agp = "9.1.0"
+gson = "2.15.0"
+guava = "33.6.0-jre"
+kotlinx-coroutines = "1.11.0"
+morphe-patcher = "2.3.0"
+morphe-patches-library = "2.1.1"
+protobuf = "0.10.0"
+protoc = "4.36.2"
+smali = "4220ae75f7"
+
+[libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+morphe-patches-library = { module = "app.morphe:morphe-patches-library", version.ref = "morphe-patches-library" }
+protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protoc" }
+
+[plugins]
+android-library = { id = "com.android.library" }
