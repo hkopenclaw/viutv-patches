@@ -145,25 +145,25 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             addInstructionsWithLabels(
                 playingIndex + 1,
                 """
-                    sget v0, Landroid/os/Build\$VERSION;->SDK_INT:I
+                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
                     const/16 v1, 0x1f
                     if-lt v0, v1, :pip_done
                     iget-object v0, v4, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
                     invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
                     move-result-object v0
                     if-eqz v0, :pip_done
-                    new-instance v1, Landroid/app/PictureInPictureParams\$Builder;
-                    invoke-direct {v1}, Landroid/app/PictureInPictureParams\$Builder;-><init>()V
+                    new-instance v1, Landroid/app/PictureInPictureParams${'$'}Builder;
+                    invoke-direct {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;-><init>()V
                     const/4 v2, 0x1
-                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams\$Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams\$Builder;
+                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams${'$'}Builder;
                     move-result-object v1
                     new-instance v2, Landroid/util/Rational;
                     const/16 v3, 0x10
                     const/16 v5, 0x9
                     invoke-direct {v2, v3, v5}, Landroid/util/Rational;-><init>(II)V
-                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams\$Builder;->setAspectRatio(Landroid/util/Rational;)Landroid/app/PictureInPictureParams\$Builder;
+                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAspectRatio(Landroid/util/Rational;)Landroid/app/PictureInPictureParams${'$'}Builder;
                     move-result-object v1
-                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams\$Builder;->build()Landroid/app/PictureInPictureParams;
+                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->build()Landroid/app/PictureInPictureParams;
                     move-result-object v1
                     invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
                     :pip_done
@@ -179,19 +179,19 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     if-nez v3, :pip_clear
                     goto :pip_orig
                     :pip_clear
-                    sget v0, Landroid/os/Build\$VERSION;->SDK_INT:I
+                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
                     const/16 v1, 0x1f
                     if-lt v0, v1, :pip_orig
                     iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
                     invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
                     move-result-object v0
                     if-eqz v0, :pip_orig
-                    new-instance v1, Landroid/app/PictureInPictureParams\$Builder;
-                    invoke-direct {v1}, Landroid/app/PictureInPictureParams\$Builder;-><init>()V
+                    new-instance v1, Landroid/app/PictureInPictureParams${'$'}Builder;
+                    invoke-direct {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;-><init>()V
                     const/4 v3, 0x0
-                    invoke-virtual {v1, v3}, Landroid/app/PictureInPictureParams\$Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams\$Builder;
+                    invoke-virtual {v1, v3}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams${'$'}Builder;
                     move-result-object v1
-                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams\$Builder;->build()Landroid/app/PictureInPictureParams;
+                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->build()Landroid/app/PictureInPictureParams;
                     move-result-object v1
                     invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
                     :pip_orig
@@ -204,7 +204,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             addInstructionsWithLabels(
                 0,
                 """
-                    sget v0, Landroid/os/Build\$VERSION;->SDK_INT:I
+                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
                     const/16 v1, 0x1a
                     if-lt v0, v1, :pip_orig
                     iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
