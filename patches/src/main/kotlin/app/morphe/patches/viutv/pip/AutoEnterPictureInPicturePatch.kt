@@ -127,10 +127,14 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *    咗嗰一刻先入先乾淨）。原因：JWPlayer 嗰個 controls auto-hide
  *    計時器喺 activity pause 嗰陣會停，入咗 PiP 之後唔會再行，所以
  *    啲制凍住喺度。修正：入 PiP 嗰陣（hook 3 嗰條路）直接將成個
- *    ControlsContainerView 隱藏（setVisibility GONE），返出嚟嗰陣
- *    （hook 4）再顯示返，之後 auto-hide 計時器會照常喺幾秒後收起佢。
+ *    ControlsContainerView 隱藏（setVisibility GONE）。
  *    用嘅係 JWPlayer 公開 API（JWPlayerView.getControlsContainer）
  *    加 View.setVisibility，唔使掂混淆咗嘅 controls controller。
+ *    （v2.3：原本返出嚟嗰陣（hook 4）會再將啲制 setVisibility(VISIBLE)
+ *    顯示返，但實測原版 Full Screen 啲制 3–4 秒會 auto-hide，patched
+ *    版唔識收起，即係我個 patch 搞到，而最可疑就係呢句 VISIBLE——
+ *    詳見 hook 4 嗰段註解。所以 v2.3 刪咗佢；出 PiP 嗰陣啲制會繼續
+ *    隱藏住，要撳一下畫面先再顯示返。）
  *
  * 問題 2 跟進（2026-11-11 01:02–02:45，已解決）：
  * 用戶話返出嚟係無聲、成個串流停埋。對過 code：
@@ -358,14 +362,19 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         }
 
         // Hook 4: onHostResume -> refresh 個 player view，等 PiP 返出嚟
-        // 畫面唔好凍住，兼將啲功能制顯示返。
+        // 畫面唔好凍住。
         // forceRefreshPlayerLayout() 係 ViuTV 自己嘅 helper：200ms 後
         // invalidate + requestLayout。每次 resume 都行一次，layout 本來
-        // 啱嘅話係無視覺變化嘅。顯示返啲制之後，auto-hide 計時器會照常
-        // 喺幾秒後收起佢。
+        // 啱嘅話係無視覺變化嘅。
+        // （v2.3 刪咗原本喺度將 ControlsContainerView setVisibility(VISIBLE)
+        // 嗰段：實測原版 Full Screen 啲制 3–4 秒會 auto-hide，但 patched
+        // 版唔識收起，即係我個 patch 搞到。最可疑就係呢句 VISIBLE——
+        // 佢喺每次 resume 嗰陣強制將啲制顯示返，如果佢喺 auto-hide 計時器
+        // 收起咗啲制之後先行，啲制就會再彈出嚟而計時器唔會重啟，變相
+        // 永遠唔收起。刪咗佢之後，出 PiP 嗰陣啲制會繼續隱藏住，要撳一下
+        // 畫面先再顯示返（JWPlayer 撳畫面顯示啲制嗰個機制本身仲喺度）。
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
-        // v2 = this；插入點喺 setPlay(true) 之後，v0、v1 已經死晒，
-        // 可以借嚟裝 playerView／container／VISIBLE 常數 0。
+        // v2 = this；插入點喺 setPlay(true) 之後。
         ReactJWPlayerViewOnHostResumeFingerprint.method.apply {
             val setPlayIndex = indexOfFirstInstructionOrThrow(
                 methodCall(
@@ -377,15 +386,6 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                 setPlayIndex + 1,
                 """
                     invoke-virtual {v2}, Lcom/viutv/ReactJWPlayerView;->forceRefreshPlayerLayout()V
-                    iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->playerView:Lcom/jwplayer/pub/view/JWPlayerView;
-                    if-eqz v0, :pip_show_done
-                    invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
-                    move-result-object v0
-                    if-eqz v0, :pip_show_done
-                    const/4 v1, 0x0
-                    invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
-                    :pip_show_done
-                    nop
                 """
             )
         }
