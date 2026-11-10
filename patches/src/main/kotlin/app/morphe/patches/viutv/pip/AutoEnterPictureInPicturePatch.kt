@@ -34,7 +34,7 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 唔使喺 onUserLeaveHint / onPause 嗰啲 timing 敏感嘅位 call
  * enterPictureInPictureMode。
  *
- * 三個 hook，全部喺 ReactJWPlayerView：
+ * 三個 hook（原本四個，Hook 2 喺 v2.2 刪除咗，見下面），全部喺 ReactJWPlayerView：
  *
  * 1) onPlay(PlayEvent) —— 播片開始，開 auto-enter：
  *    喺 VideoEventEmitter.playing() 之後插入，SDK >= 31 先做：
@@ -49,20 +49,17 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *      已經死晒，可以借嚟裝常數 9）。
  *    - 插入點嗰陣：v4 係 this，v5 係 event，兩個都唔再用。
  *
- * 2) setPlay(Z) —— 收到 pause（false），閂 auto-enter：
- *    喺 method 開頭插入，SDK >= 31 先做：
- *      activity.setPictureInPictureParams(
- *        Builder().setAutoEnterEnabled(false).build())
- *    目的：pause 咗、或者返去瀏覽頁之後再撳 Home，唔應該彈個 PiP 出嚟
- *    （會變咗一個細窗顯示暫停畫面 / 瀏覽頁）。
- *    Register 分析（已核實）：
- *    - 呢個 method 一共用 4 個 register：v0–v1 係 locals，v2 = this，
- *      v3 = boolean 參數。
- *    - 插入點嗰陣：v3 係 false（淨係呢個分支先會清 auto-enter），
- *      之後原 code 讀 v3 都係 0，寫返同一個值係安全嘅。
- *    - setPlay(false) 嘅 caller 包括 onHostPause（離開 app）同 JS 嗰邊
- *      嘅 pause；onHostPause 嗰條路喺入咗 PiP 嗰陣會由 hook 3 攔截，
- *      唔會行到呢度，所以唔會喺 PiP 入面誤閂 auto-enter。
+ * 2) setPlay(Z) —— 已刪除（v2.2）。
+ *    原本：收到 pause（false）就閂 auto-enter，目的係 pause 咗、或者返去
+ *    瀏覽頁之後再撳 Home，唔應該彈個 PiP 出嚟。
+ *    刪除原因（bisect 實證，2026-11-11）：manifest-only 版播得返；
+ *    bisect 2（無 Hook 1，留 Hook 2／3／4）都係停；bisect 3（無 Hook 1／2，
+ *    留 Hook 3／4）播得返。Hook 1 同 Hook 3／4 都清白，兇手就係 Hook 2——
+ *    佢喺每次 pause 嗰陣 call setPictureInPictureParams，唔知咩機制搞到
+ *    返嚟嗰陣串流停埋。機制未解到，所以唔係改寫佢，係直接刪咗佢。
+ *    已知代價：播片停咗／完咗之後 auto-enter 仲係開住，呢個時候撳 Home
+ *    會入 PiP（播緊嗰陣就正常）。要清 auto-enter 嘅話，要搵個唔喺 pause
+ *    嗰條路上面嘅觸發點，日後再做。
  *
  * 3) onHostPause() —— 入咗 PiP 嗰陣唔好 pause：
  *    呢個係 v2 第二個要解決嘅問題（未核實嗰陣已經估到，寫 patch 嗰陣核實咗）：
@@ -78,7 +75,7 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 寫法注意（2026-11-10 Build #54 撞過）：
  * addInstructionsWithLabels 要求每個 label 後面喺同一個插入 block 入面
  * 至少要有一行 instruction；label 喺 block 最尾、後面乜都無，就會
- * IndexOutOfBoundsException（length 0）成個 patch fail。所以下面三個
+ * IndexOutOfBoundsException（length 0）成個 patch fail。所以下面啲
  * hook 嘅 :pip_done / :pip_orig 後面全部有一個 nop 墊底，唔好刪。
  * （2026-11-11 Build #56 撞過）const/4 只裝到 -8 至 7，GONE（8）
  * 一定要用 const/16，寫 const/4 v1, 0x8 會 parse 失敗，成個 patch
@@ -89,14 +86,18 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *   唔掂任何 DRM（Widevine）code，唔掂 JS bundle。
  * - Patch 2 留喺度（對一個 JS 從來唔用嘅 view set flag，係 inert 嘅，
  *   唔會有副作用）；Patch 1（manifest）繼續係必要條件。
- * - minSdk 係 24，所以三個 hook 全部有 SDK_INT 檢查，API 24–25 嘅機
+ * - minSdk 係 24，所以啲 hook 全部有 SDK_INT 檢查，API 24–25 嘅機
  *   完全唔行呢啲 code，唔會 crash。
+ *
+ * 已知限制（Hook 2 刪除之後）：
+ * - 播完片（CompleteEvent）之後 auto-enter 仲開住，撳 Home 會彈個
+ *   已完結畫面嘅 PiP。Hook 2 刪除之前，setPlay(false) 嗰個 clear 未必
+ *   cover 到完結嗰條路；刪除之後更加唔會清。要清 auto-enter 嘅話，要搵
+ *   個唔喺 pause 嗰條路上面嘅觸發點，日後再做。
  *
  * 仲未核實、要實機測先知嘅嘢：
  * - JWPlayer 嘅事件 callback 係咪行喺 main thread（setPictureInPictureParams
  *   要 main thread；JWPlayer Android SDK 慣例係 main thread 派事件）。
- * - 播完片（CompleteEvent）之後 auto-enter 仲開住，撳 Home 會唔會彈個
- *   已完結畫面嘅 PiP（setPlay(false) 嗰個 clear 未必 cover 到完結嗰條路）。
  *
  * v2.1（2026-11-11，用戶實測 v2 嗰版之後）：
  * v2 入到 PiP，但有兩個問題：
@@ -131,20 +132,25 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *    用嘅係 JWPlayer 公開 API（JWPlayerView.getControlsContainer）
  *    加 View.setVisibility，唔使掂混淆咗嘅 controls controller。
  *
- * 問題 2 跟進（2026-11-11 01:02–01:04，仲查緊）：
+ * 問題 2 跟進（2026-11-11 01:02–02:45，已解決）：
  * 用戶話返出嚟係無聲、成個串流停埋。對過 code：
  * - onDetachedFromWindow 只係 call onStopPlayback（淨係熄 keepScreenOn，
  *   唔會停 player），唔係兇手。
- * - 真正殺 player 嘅係 releasePlayer()：pause + stop + 用空 config
- *   重新 setup + player = null + 拆走 playerView。行完之後 setPlay(true)
- *   會因為 player 係 null 而直接 return，撳播放都救唔返——同用戶
- *   「要重新出去入番先得」吻合（出入畫面先會重新 createPlayer）。
- * - releasePlayer 嘅 caller 係 stopPlayback()，而 stopPlayback 嘅 caller
- *   係 onHostDestroy（activity 毀滅先行，PiP 返出嚟唔會行）同埋
- *   ReactJWPlayerManager.receiveCommand／createViewInstance（JS／RN
- *   嗰邊嘅指令）。邊一個喺 PiP 返出嚟嗰陣行，靜態睇唔到，要用
- *   logcat（REACT_JWPLAYER_VIEW tag）先分到。下一個 build 之後
- *   如果仲停，就要捉 log。
+ * - 最初懷疑 releasePlayer()：pause + stop + 用空 config 重新 setup +
+ *   player = null + 拆走 playerView。行完之後 setPlay(true) 會因為 player
+ *   係 null 而直接 return，撳播放都救唔返——同用戶「要重新出去入番先得」
+ *   吻合。但 pip-exit.log 入面完全無 stopPlayback／releasePlayer／
+ *   onHostDestroy／onDetachedFromWindow，即係 player 根本無被釋放，
+ *   呢個理論錯咗，已經收回。
+ * - Bisect 實證（2026-11-11 02:12–02:44）：manifest-only 版（v1.1.4）
+ *   播得返 → manifest 無辜；bisect 2（v1.1.5，無 Hook 1，留 Hook 2／3／4）
+ *   都係停 → Hook 1 無辜；bisect 3（v1.1.6，無 Hook 1／2，留 Hook 3／4）
+ *   播得返 → 兇手就係 Hook 2（setPlay(false) 嗰陣 call
+ *   setPictureInPictureParams 清 auto-enter）。機制未解到——靜態對過
+ *   DEX，原有 code 逐行同 stock 一樣，jump target 同 register 都啱，
+ *   但 runtime 就係搞到返嚟嗰陣串流停埋。
+ * - v2.2（2026-11-11）：刪除 Hook 2，還原 Hook 1（連 helper）、Hook 3、
+ *   Hook 4，Patch 2 繼續停用。已知代價見上面「已知限制」。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -269,21 +275,6 @@ private object ReactJWPlayerViewOnHostResumeFingerprint : Fingerprint(
     )
 )
 
-private object ReactJWPlayerViewSetPlayFingerprint : Fingerprint(
-    definingClass = "Lcom/viutv/ReactJWPlayerView;",
-    name = "setPlay",
-    returnType = "V",
-    parameters = listOf("Z"),
-    filters = listOf(
-        methodCall(
-            "Lcom/jwplayer/pub/api/JWPlayer;->play()V"
-        ),
-        methodCall(
-            "Lcom/jwplayer/pub/api/JWPlayer;->pause()V"
-        ),
-    )
-)
-
 val autoEnterPictureInPicturePatch = bytecodePatch(
     name = "Auto-enter Picture-in-Picture (JWPlayer)",
     description = "Makes the JWPlayer enter Picture-in-Picture automatically when " +
@@ -293,26 +284,43 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
     compatibleWith(COMPATIBILITY_VIUTV)
 
     execute {
-        // DIAGNOSTIC (bisect 2): Hook 1 已停用。
-        // Manifest-only 版（v1.1.4）播得返，即係兇手喺 code hook 入面。
-        // Hook 1（onPlay -> setPictureInPictureParams）係唯一一個喺
-        // 正常播片期間會行嘅 hook，所以先停佢：呢個版保留 Hook 2／3／4，
-        // 但 auto-enter 永遠唔會開（無嘢 set 佢做 true），即係唔會自動入 PiP。
-        // 如果呢個版播得返，兇手就係 Hook 1（或者佢 call 嘅 helper method）；
-        // 如果都係停，兇手就喺 Hook 2／3／4 入面。臨時改動，測完還原。
-        // （原本嘅 Hook 1 code 喺 git 入面，commit 7f3b79b／188bfa4 有齊。）
+        // 先加 helper method（Hook 1 會 call 佢）。
+        addMorpheUpdatePipParamsMethod()
 
-        // DIAGNOSTIC (bisect 3): Hook 2 已停用。
-        // Bisect 2（無 Hook 1，留 Hook 2／3／4）都係停，即係 Hook 1 無辜。
-        // 而 v2（Hook 1／2／3）都停，但 v2.1 先有 Hook 4，所以 Hook 4
-        // 唔可能係 v2 嗰陣嘅兇手；兇手喺 Hook 2 或 Hook 3 入面。
-        // Hook 3 喺無 PiP 嘅情況下只係讀一次 PiP mode 再落返去原本
-        // 嗰個 pause，乜都無改過，唔可能搞停佢；Hook 2 係唯一一個喺
-        // background 嗰條路上面會主動 call setPictureInPictureParams
-        // 嘅 hook，所以先停佢。呢個版淨係留 Hook 3／4。
-        // 如果播得返，兇手就係 Hook 2；如果都係停，兇手就係 Hook 3
-        // （或者 Hook 2＋3 嘅組合）。臨時改動，測完還原。
-        // （原本嘅 Hook 2 code 喺 git 入面，commit 7f3b79b 有齊。）
+        // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
+        // Register 分析（已核實）：呢個 method 一共用 6 個 register，
+        // v4 = this，v0 借嚟裝 activity；call 完 helper 就唔再用 v0。
+        ReactJWPlayerViewOnPlayFingerprint.method.apply {
+            val playingIndex = indexOfFirstInstructionOrThrow(
+                methodCall(
+                    "Lcom/viutv/VideoEventEmitter;->playing()V"
+                )
+            )
+
+            addInstructionsWithLabels(
+                playingIndex + 1,
+                """
+                    iget-object v0, v4, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
+                    invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
+                    move-result-object v0
+                    if-eqz v0, :pip_done
+                    invoke-virtual {v4, v0}, Lcom/viutv/ReactJWPlayerView;->morpheUpdatePipParams(Landroid/app/Activity;)V
+                    :pip_done
+                    nop
+                """
+            )
+        }
+
+        // Hook 2（setPlay(false) -> 閂 auto-enter）已刪除，唔係停用。
+        // Bisect 實證（2026-11-11）：manifest-only 版播得返；
+        // bisect 2（無 Hook 1，留 Hook 2／3／4）都係停；bisect 3
+        // （無 Hook 1／2，留 Hook 3／4）播得返。Hook 1 同 Hook 3／4
+        // 都清白，兇手就係 Hook 2——佢喺每次 pause 嗰陣 call
+        // setPictureInPictureParams，唔知咩機制搞到返嚟嗰陣串流停埋。
+        // 機制未解到，所以唔係改寫佢，係直接刪咗佢。
+        // 已知代價：播片停咗／完咗之後 auto-enter 仲係開住，
+        // 呢個時候撳 Home 會入 PiP（播緊嗰陣就正常）。要清 auto-enter
+        // 嘅話，要搵個唔喺 pause 嗰條路上面嘅觸發點，日後再做。
 
         // Hook 3: onHostPause -> 入咗 PiP 就唔 pause，兼收起啲功能制。
         // 啲制喺 PiP 入面唔會自己消失（auto-hide 計時器喺 pause 嗰陣停
