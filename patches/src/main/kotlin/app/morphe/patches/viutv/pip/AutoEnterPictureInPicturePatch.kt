@@ -10,6 +10,7 @@ import app.morphe.patches.viutv.shared.Constants.COMPATIBILITY_VIUTV
 import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.immutable.ImmutableField
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
@@ -155,6 +156,30 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *   但 runtime 就係搞到返嚟嗰陣串流停埋。
  * - v2.2（2026-11-11）：刪除 Hook 2，還原 Hook 1（連 helper）、Hook 3、
  *   Hook 4，Patch 2 繼續停用。已知代價見上面「已知限制」。
+ *
+ * v2.4（2026-11-11，用戶實測 v2.2 之後）：
+ * v2.2 入到 PiP、串流 keep 到、Full Screen 啲制 3–4 秒會收起（同原版
+ * 一樣），但 PiP 窗仲有兩個問題，令個 PiP 唔係一個睇得嘅 PiP：
+ * 1) PiP 窗入面有成行 nav bar（主頁／節目／一齊睇／節目表／我的），
+ *    即使 PiP 較到最大都仲阻住 1/3 畫面（2026-11-11 03:34 用戶截圖
+ *    實證）。原因：setSourceRectHint 淨係入 PiP 動畫嘅 hint，唔係裁剪
+ *    畫面，PiP 窗永遠顯示成個 activity 再縮去 16:9。
+ * 2) 功能制開住嗰陣轉 PiP，入咗 PiP 之後唔識 auto-hide（Hook 3 嗰句
+ *    GONE 淨係掂個 ControlsContainerView，唔知點解 hold 唔住）。
+ * 修正：新加一個 helper morpheSetPipUiHidden(Z) + 一個 field
+ * morpheHiddenViews。入 PiP（onHostPause 開頭，無條件行）嗰陣，
+ * 將 ControlsContainerView 同埋由播放器 view 行上去 root、逐層
+ * 嘅 siblings（即係 nav bar、標題列等等所有唔係片嘅 UI）全部隱藏
+ * （GONE），淨係 hide 原本 VISIBLE 嗰啲，全部記入 list；出 PiP
+ * （onHostResume 開頭）嗰陣將 list 入面嗰啲逐個 set 返 VISIBLE。
+ * 咁樣 PiP 窗淨係會顯示片本身。還原唔係強制 VISIBLE，唔會重蹈
+ * v2.3 嗰句 VISIBLE 嘅覆轍。
+ * 另外澄清：v2.3（刪 Hook 4 嗰句 VISIBLE）係建基於「Full Screen
+ * 啲制唔識收起」呢個前提，但用戶 2026-11-11 03:28 再試 v1.1.7
+ * 證實 Full Screen 啲制其實 3–4 秒會收起，同原版一樣——即係 v2.3
+ * 嗰個前提係錯嘅，Full Screen 從來無壞過。v2.3 嗰版（tag 15）
+ * 唔使裝，留喺 v2.2（tag 14）就得；v2.4 係喺 v2.2 嘅行為上面加
+ * hide／restore，唔會還原嗰句強制 VISIBLE。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -236,6 +261,167 @@ private fun addMorpheUpdatePipParamsMethod() {
     )
 }
 
+/**
+ * 喺 ReactJWPlayerView 加一個 private field：
+ *   private ArrayList<View> morpheHiddenViews
+ *
+ * 用嚟記住入 PiP 嗰陣隱藏咗邊啲 view（連埋佢哋原本係 VISIBLE 呢個事實），
+ * 等出 PiP 嗰陣還原返。淨係記 VISIBLE 嗰啲，所以還原嗰陣一律 set VISIBLE
+ * 就啱（原本 GONE／INVISIBLE 嗰啲根本唔會入 list，唔會俾人錯誤顯示返）。
+ * （加 field 嘅寫法抄 ref 嘅 ForceOriginalAudioPatch。）
+ */
+private fun addMorpheHiddenViewsField() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").apply {
+        fields.add(
+            ImmutableField(
+                "Lcom/viutv/ReactJWPlayerView;",
+                "morpheHiddenViews",
+                "Ljava/util/ArrayList;",
+                AccessFlags.PRIVATE.value,
+                null,
+                null,
+                null
+            ).toMutable()
+        )
+    }
+}
+
+/**
+ * 喺 ReactJWPlayerView 加一個 helper method：
+ *   public morpheSetPipUiHidden(boolean hidden)
+ *
+ * hidden = true（入 PiP）：
+ *   1) 將 JWPlayer 嘅 ControlsContainerView 隱藏（GONE），等功能制唔會
+ *      黐住喺 PiP 窗入面。淨係 hide 原本 VISIBLE 嗰個，記入 list。
+ *   2) 由呢個 view（ReactJWPlayerView）一路行上去 root，逐層將同層
+ *      嘅其他 child（siblings）隱藏——呢啲就係 nav bar、標題列等等
+ *      唔係片嘅 UI。淨係 hide 原本 VISIBLE 嗰啲，全部記入 list。
+ *      咁樣 PiP 窗淨係會顯示播放器本身（片），唔會再有 1/3 畫面俾
+ *      條 nav bar 阻住（2026-11-11 03:34 用戶截圖實證）。
+ *   3) 每行一次都會先 clear 個 list，唔會累積舊嘅／重複嘅 entry。
+ *
+ * hidden = false（出 PiP）：
+ *   將 list 入面所有 view 逐個 set 返 VISIBLE，再 clear 個 list。
+ *   （淨係還原返我哋 hide 過嗰啲；原本已經 GONE／INVISIBLE 嗰啲
+ *   從來無入過 list，唔會俾人錯誤顯示返。）
+ *
+ * 點解要行上去逐層 hide siblings，而唔係淨係搵條 nav bar：
+ * 播放器畫面下面除咗 nav bar，唔同畫面仲可能有其他 UI（標題、頻道
+ * 資訊等等），逐層 hide 就唔使估邊個係 nav bar、佢喺邊一層，全部
+ * 唔係片嘅嘢都會匿埋。Walk 會喺 parent 唔係 ViewGroup（去到頂）
+ * 嗰陣停。
+ *
+ * Register 用法（呢個 method 自己有 10 個 register）：
+ * - v0：而家行緊嗰層嘅 view（cur），開頭係 this，一路變做 parent；
+ *   hide container 嗰陣短暫借嚟裝 playerView／container。
+ * - v1：parent（ViewGroup）。v2：child count／list size／instanceof 結果。
+ * - v3：loop index。v4：child view。v5：morpheHiddenViews list。
+ * - v6：visibility 值／GONE（8）／VISIBLE（0）。v7：ArrayList.add 嘅
+ *   boolean return（要 consume，唔係齋放喺度）。
+ * - p0 = this，p1 = hidden（Z）。
+ *
+ * 注意（if 指令嘅語義，唔好寫反）：
+ * - if-eqz = jump if == 0；if-nez = jump if != 0。
+ *   所以「淨係 hide VISIBLE（visibility == 0）」要用 if-eqz，
+ *   「list 係 null 先 create」要用 if-nez 跳過 create。
+ * - instance-of 係直接寫入目標 register，唔使 move-result。
+ */
+private fun addMorpheSetPipUiHiddenMethod() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").methods.add(
+        ImmutableMethod(
+            "Lcom/viutv/ReactJWPlayerView;",
+            "morpheSetPipUiHidden",
+            listOf(ImmutableMethodParameter("Z", null, null)),
+            "V",
+            AccessFlags.PUBLIC.value,
+            null,
+            null,
+            MutableMethodImplementation(10),
+        ).toMutable().apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    if-eqz p1, :restore
+                    iget-object v5, p0, Lcom/viutv/ReactJWPlayerView;->morpheHiddenViews:Ljava/util/ArrayList;
+                    if-nez v5, :list_ready
+                    new-instance v5, Ljava/util/ArrayList;
+                    invoke-direct {v5}, Ljava/util/ArrayList;-><init>()V
+                    iput-object v5, p0, Lcom/viutv/ReactJWPlayerView;->morpheHiddenViews:Ljava/util/ArrayList;
+                    :list_ready
+                    invoke-virtual {v5}, Ljava/util/ArrayList;->clear()V
+                    iget-object v0, p0, Lcom/viutv/ReactJWPlayerView;->playerView:Lcom/jwplayer/pub/view/JWPlayerView;
+                    if-eqz v0, :walk_start
+                    invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
+                    move-result-object v0
+                    if-eqz v0, :walk_start
+                    invoke-virtual {v0}, Landroid/view/View;->getVisibility()I
+                    move-result v6
+                    if-eqz v6, :hide_container
+                    goto :walk_start
+                    :hide_container
+                    invoke-virtual {v5, v0}, Ljava/util/ArrayList;->add(Ljava/lang/Object;)Z
+                    move-result v7
+                    const/16 v6, 0x8
+                    invoke-virtual {v0, v6}, Landroid/view/View;->setVisibility(I)V
+                    :walk_start
+                    move-object v0, p0
+                    :walk_loop
+                    invoke-virtual {v0}, Landroid/view/View;->getParent()Landroid/view/ViewParent;
+                    move-result-object v1
+                    if-eqz v1, :hide_done
+                    instance-of v2, v1, Landroid/view/ViewGroup;
+                    if-eqz v2, :hide_done
+                    check-cast v1, Landroid/view/ViewGroup;
+                    invoke-virtual {v1}, Landroid/view/ViewGroup;->getChildCount()I
+                    move-result v2
+                    const/4 v3, 0x0
+                    :child_loop
+                    if-ge v3, v2, :child_done
+                    invoke-virtual {v1, v3}, Landroid/view/ViewGroup;->getChildAt(I)Landroid/view/View;
+                    move-result-object v4
+                    if-eq v4, v0, :child_next
+                    invoke-virtual {v4}, Landroid/view/View;->getVisibility()I
+                    move-result v6
+                    if-eqz v6, :hide_child
+                    goto :child_next
+                    :hide_child
+                    invoke-virtual {v5, v4}, Ljava/util/ArrayList;->add(Ljava/lang/Object;)Z
+                    move-result v7
+                    const/16 v6, 0x8
+                    invoke-virtual {v4, v6}, Landroid/view/View;->setVisibility(I)V
+                    :child_next
+                    add-int/lit8 v3, v3, 0x1
+                    goto :child_loop
+                    :child_done
+                    move-object v0, v1
+                    goto :walk_loop
+                    :hide_done
+                    return-void
+                    :restore
+                    iget-object v5, p0, Lcom/viutv/ReactJWPlayerView;->morpheHiddenViews:Ljava/util/ArrayList;
+                    if-eqz v5, :restore_done
+                    invoke-virtual {v5}, Ljava/util/ArrayList;->size()I
+                    move-result v2
+                    const/4 v3, 0x0
+                    :restore_loop
+                    if-ge v3, v2, :restore_clear
+                    invoke-virtual {v5, v3}, Ljava/util/ArrayList;->get(I)Ljava/lang/Object;
+                    move-result-object v4
+                    check-cast v4, Landroid/view/View;
+                    const/4 v6, 0x0
+                    invoke-virtual {v4, v6}, Landroid/view/View;->setVisibility(I)V
+                    add-int/lit8 v3, v3, 0x1
+                    goto :restore_loop
+                    :restore_clear
+                    invoke-virtual {v5}, Ljava/util/ArrayList;->clear()V
+                    :restore_done
+                    return-void
+                """
+            )
+        }
+    )
+}
+
 private object ReactJWPlayerViewOnPlayFingerprint : Fingerprint(
     definingClass = "Lcom/viutv/ReactJWPlayerView;",
     name = "onPlay",
@@ -288,8 +474,10 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
     compatibleWith(COMPATIBILITY_VIUTV)
 
     execute {
-        // 先加 helper method（Hook 1 會 call 佢）。
+        // 先加 helper method（Hook 1 會 call 佢）同埋 v2.4 嘅 field＋helper。
         addMorpheUpdatePipParamsMethod()
+        addMorpheHiddenViewsField()
+        addMorpheSetPipUiHiddenMethod()
 
         // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
         // Register 分析（已核實）：呢個 method 一共用 6 個 register，
@@ -326,16 +514,25 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 呢個時候撳 Home 會入 PiP（播緊嗰陣就正常）。要清 auto-enter
         // 嘅話，要搵個唔喺 pause 嗰條路上面嘅觸發點，日後再做。
 
-        // Hook 3: onHostPause -> 入咗 PiP 就唔 pause，兼收起啲功能制。
-        // 啲制喺 PiP 入面唔會自己消失（auto-hide 計時器喺 pause 嗰陣停
-        // 咗），所以入 PiP 嗰陣直接將成個 ControlsContainerView 隱藏。
+        // Hook 3: onHostPause -> 離開嗰陣隱藏所有唔係片嘅 UI，入咗 PiP 就唔 pause。
+        // morpheSetPipUiHidden(true) 喺 method 開頭無條件行：無論入 PiP
+        // 定係普通 background，離開播放畫面嗰陣都將 nav bar／功能制等
+        // 非播放器 UI 隱藏埋（background 嗰陣根本無人睇到，唔會有影響）；
+        // 咁做係為咗唔使依賴 isInPictureInPictureMode 喺 onHostPause
+        // 嗰刻讀到嘅 timing——就算 PiP mode 嗰刻仲未 set 好，啲 UI
+        // 都已經匿埋咗。還原係 Hook 4 嗰邊做。
+        // PiP guard 唔變：入咗 PiP 就 return，唔行原本嘅 setPlay(false)。
+        // （v2.4 之前呢度係 inline hide 個 ControlsContainerView，
+        // 而家搬咗入 morpheSetPipUiHidden，連 nav bar 一齊處理。）
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
-        // v2 = this；v0 喺 isInPictureInPictureMode 之後已經死晒，可以
-        // 借嚟裝 playerView／container，v1 借嚟裝 GONE 常數 8。
+        // v2 = this；開頭 v0 未用過，借嚟裝 boolean（true = 1）。
+        // 之後 v0 會俾 SDK 檢查覆寫，唔會有衝突。
         ReactJWPlayerViewOnHostPauseFingerprint.method.apply {
             addInstructionsWithLabels(
                 0,
                 """
+                    const/4 v0, 0x1
+                    invoke-virtual {v2, v0}, Lcom/viutv/ReactJWPlayerView;->morpheSetPipUiHidden(Z)V
                     sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
                     const/16 v1, 0x1a
                     if-lt v0, v1, :pip_orig
@@ -346,14 +543,6 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-virtual {v0}, Landroid/app/Activity;->isInPictureInPictureMode()Z
                     move-result v1
                     if-eqz v1, :pip_orig
-                    iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->playerView:Lcom/jwplayer/pub/view/JWPlayerView;
-                    if-eqz v0, :pip_hide_done
-                    invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
-                    move-result-object v0
-                    if-eqz v0, :pip_hide_done
-                    const/16 v1, 0x8
-                    invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
-                    :pip_hide_done
                     return-void
                     :pip_orig
                     nop
@@ -361,8 +550,13 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             )
         }
 
-        // Hook 4: onHostResume -> refresh 個 player view，等 PiP 返出嚟
-        // 畫面唔好凍住。
+        // Hook 4: onHostResume -> 還原返隱藏咗嘅 UI，再 refresh 個 player view，
+        // 等 PiP 返出嚟畫面唔好凍住。
+        // 還原（morpheSetPipUiHidden(false)）：將入 PiP 嗰陣隱藏咗嘅
+        // nav bar／功能制逐個 set 返 VISIBLE。呢個唔係 v2.3 嗰句強制
+        // setVisibility(VISIBLE)——嗰句係無條件將成個 container 顯示返，
+        // 唔理佢原本係咩狀態；呢個係還原 list 入面記住咗嗰啲 view（淨係
+        // 原本 VISIBLE 先會入 list），所以唔會重蹈覆轍。
         // forceRefreshPlayerLayout() 係 ViuTV 自己嘅 helper：200ms 後
         // invalidate + requestLayout。每次 resume 都行一次，layout 本來
         // 啱嘅話係無視覺變化嘅。
@@ -373,8 +567,16 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 收起咗啲制之後先行，啲制就會再彈出嚟而計時器唔會重啟，變相
         // 永遠唔收起。刪咗佢之後，出 PiP 嗰陣啲制會繼續隱藏住，要撳一下
         // 畫面先再顯示返（JWPlayer 撳畫面顯示啲制嗰個機制本身仲喺度）。
+        // 2026-11-11 03:28 用戶再試 v1.1.7 澄清：Full Screen 啲制其實
+        // 3–4 秒會收起，同原版一樣——即係 v2.3 嗰個前提係錯嘅，Full Screen
+        // 從來無壞過。不過 v2.4 呢個還原做法本身就唔係強制 VISIBLE，
+        // 所以唔會受嗰個問題影響；v2.3 嗰句 VISIBLE 唔會還原返。）
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
-        // v2 = this；插入點喺 setPlay(true) 之後。
+        // v2 = this。還原嗰個插入點喺 method 開頭（position 0），嗰陣
+        // v0 未用過，借嚟裝 boolean（false = 0）。forceRefresh 嗰個
+        // 插入點喺 setPlay(true) 之後。
+        // 注意：兩個插入要由後向前做（先 setPlay+1，後 position 0），
+        // 唔係 position 0 嗰個插入會令 setPlay 嗰個 index 移位。
         ReactJWPlayerViewOnHostResumeFingerprint.method.apply {
             val setPlayIndex = indexOfFirstInstructionOrThrow(
                 methodCall(
@@ -386,6 +588,14 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                 setPlayIndex + 1,
                 """
                     invoke-virtual {v2}, Lcom/viutv/ReactJWPlayerView;->forceRefreshPlayerLayout()V
+                """
+            )
+
+            addInstructionsWithLabels(
+                0,
+                """
+                    const/4 v0, 0x0
+                    invoke-virtual {v2, v0}, Lcom/viutv/ReactJWPlayerView;->morpheSetPipUiHidden(Z)V
                 """
             )
         }
