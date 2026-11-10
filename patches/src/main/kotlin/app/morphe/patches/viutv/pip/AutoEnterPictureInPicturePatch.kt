@@ -1,11 +1,17 @@
 package app.morphe.patches.viutv.pip
 
 import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.mutableClassDefBy
 import app.morphe.patches.viutv.shared.Constants.COMPATIBILITY_VIUTV
 import app.morphe.util.indexOfFirstInstructionOrThrow
+import com.android.tools.smali.dexlib2.AccessFlags
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 
 /**
  * Patch 3 — Bytecode：JWPlayer 自動入 PiP（v2，取代 Patch 2 嘅做法）。
@@ -88,7 +94,109 @@ import app.morphe.util.indexOfFirstInstructionOrThrow
  *   要 main thread；JWPlayer Android SDK 慣例係 main thread 派事件）。
  * - 播完片（CompleteEvent）之後 auto-enter 仲開住，撳 Home 會唔會彈個
  *   已完結畫面嘅 PiP（setPlay(false) 嗰個 clear 未必 cover 到完結嗰條路）。
+ *
+ * v2.1（2026-11-11，用戶實測 v2 嗰版之後）：
+ * v2 入到 PiP，但有兩個問題：
+ * 1) 非全螢幕入 PiP，PiP 窗入面連下面嗰行功能 bar（主頁／節目／一齊睇／
+ *    節目表／我的）都包埋——因為 setPictureInPictureParams 淨係得
+ *    aspect ratio，系統將成個 activity 內容縮入個窗。修正：加埋
+ *    setSourceRectHint，用播放器 view 喺螢幕上面嘅實際範圍做 rect，
+ *    PiP 窗淨係顯示片嗰忽（同 JWPlayer 自己 m.b.d() 嘅做法一樣）。
+ *    問題係 onPlay 得 6 個 register，計 rect 要 7 個值同時在生，
+ *    唔夠位。所以將成個 set params 搬去一個新加嘅 helper method
+ *    morpheUpdatePipParams(Activity)，佢有自己嘅 register set，
+ *    onPlay 淨係負責拎 activity 再 call 佢。
+ * 2) PiP 返去正常／全螢幕，串流畫面停咗，要出去入番先得。
+ *    onHostResume 本身已經有 setPlay(true)，但如果個 player 喺
+ *    PLAYING 狀態，play() 係 no-op，畫面凍結（surface／layout 未
+ *    refresh）係唔會靠佢解到。修正：onHostResume 之後加多句
+ *    forceRefreshPlayerLayout()——ViuTV 自己嘅 helper（200ms 後
+ *    invalidate + requestLayout），本來就係廣告播完／mid-roll／
+ *    鍵盤彈出呢啲 layout 變咗之後用嚟 refresh 個 player view。
+ *    每次 resume 都行一次，layout 本來啱嘅話係無視覺變化嘅。
+ *    仲未分到凍結嗰陣聲音有無繼續（surface 問題定係真係 pause 咗）；
+ *    如果 v2.1 之後仲凍，就要問埋呢樣再查。
  */
+/**
+ * 喺 ReactJWPlayerView 加一個 helper method：
+ *   public morpheUpdatePipParams(Activity activity)
+ *
+ * 做晒成個 setPictureInPictureParams：auto-enter on、16:9、再加埋
+ * source rect hint（呢個 view 喺螢幕上面嘅實際範圍，等 PiP 窗淨係
+ * 顯示片嗰忽，唔包下面嗰行功能 bar）。
+ *
+ * 點解要獨立一個 method（唔直接寫喺 onPlay）：onPlay 得 6 個 register，
+ * 計 source rect 要 activity、builder、left、top、right、bottom、
+ * Rect object 七個值同時在生，唔夠位。呢個 method 自己有 10 個
+ * register（v0–v7 locals + p0 this + p1 activity），夠用。
+ * （加 method 嘅寫法抄 ref 嘅 PlaylistTrackTapPatch.addInterfaceMethod；
+ * 注意 ImmutableMethod 嘅 registerCount 係 locals + params 嘅總數。）
+ *
+ * Register 用法（已核實）：
+ * - v0：SDK_INT → Builder → Params（一路轉手，唔會同時要兩個值）。
+ * - v1：31 → Rational → int[2] array → width → right。
+ * - v2：16 → left。v3：9 → top。v4：height → bottom。v5：Rect。
+ * - v6、v7：aget 嗰陣嘅 index 常數（0／1）。
+ * - p0 = this（ReactJWPlayerView），p1 = activity。
+ */
+private fun addMorpheUpdatePipParamsMethod() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").methods.add(
+        ImmutableMethod(
+            "Lcom/viutv/ReactJWPlayerView;",
+            "morpheUpdatePipParams",
+            listOf(ImmutableMethodParameter("Landroid/app/Activity;", null, null)),
+            "V",
+            AccessFlags.PUBLIC.value,
+            null,
+            null,
+            MutableMethodImplementation(10),
+        ).toMutable().apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
+                    const/16 v1, 0x1f
+                    if-lt v0, v1, :done
+                    if-eqz p1, :done
+                    new-instance v0, Landroid/app/PictureInPictureParams${'$'}Builder;
+                    invoke-direct {v0}, Landroid/app/PictureInPictureParams${'$'}Builder;-><init>()V
+                    const/4 v1, 0x1
+                    invoke-virtual {v0, v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams${'$'}Builder;
+                    move-result-object v0
+                    new-instance v1, Landroid/util/Rational;
+                    const/16 v2, 0x10
+                    const/16 v3, 0x9
+                    invoke-direct {v1, v2, v3}, Landroid/util/Rational;-><init>(II)V
+                    invoke-virtual {v0, v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAspectRatio(Landroid/util/Rational;)Landroid/app/PictureInPictureParams${'$'}Builder;
+                    move-result-object v0
+                    const/4 v1, 0x2
+                    new-array v1, v1, [I
+                    invoke-virtual {p0, v1}, Landroid/view/View;->getLocationOnScreen([I)V
+                    const/4 v6, 0x0
+                    aget v2, v1, v6
+                    const/4 v6, 0x1
+                    aget v3, v1, v6
+                    invoke-virtual {p0}, Landroid/view/View;->getWidth()I
+                    move-result v1
+                    add-int v1, v2, v1
+                    invoke-virtual {p0}, Landroid/view/View;->getHeight()I
+                    move-result v4
+                    add-int v4, v3, v4
+                    new-instance v5, Landroid/graphics/Rect;
+                    invoke-direct {v5, v2, v3, v1, v4}, Landroid/graphics/Rect;-><init>(IIII)V
+                    invoke-virtual {v0, v5}, Landroid/app/PictureInPictureParams${'$'}Builder;->setSourceRectHint(Landroid/graphics/Rect;)Landroid/app/PictureInPictureParams${'$'}Builder;
+                    move-result-object v0
+                    invoke-virtual {v0}, Landroid/app/PictureInPictureParams${'$'}Builder;->build()Landroid/app/PictureInPictureParams;
+                    move-result-object v0
+                    invoke-virtual {p1, v0}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
+                    :done
+                    return-void
+                """
+            )
+        }
+    )
+}
+
 private object ReactJWPlayerViewOnPlayFingerprint : Fingerprint(
     definingClass = "Lcom/viutv/ReactJWPlayerView;",
     name = "onPlay",
@@ -112,6 +220,21 @@ private object ReactJWPlayerViewOnHostPauseFingerprint : Fingerprint(
     filters = listOf(
         methodCall(
             "Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V"
+        ),
+    )
+)
+
+private object ReactJWPlayerViewOnHostResumeFingerprint : Fingerprint(
+    definingClass = "Lcom/viutv/ReactJWPlayerView;",
+    name = "onHostResume",
+    returnType = "V",
+    parameters = listOf(),
+    filters = listOf(
+        methodCall(
+            "Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V"
+        ),
+        methodCall(
+            "Landroidx/lifecycle/LifecycleRegistry;->setCurrentState(Landroidx/lifecycle/Lifecycle\$State;)V"
         ),
     )
 )
@@ -140,7 +263,12 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
     compatibleWith(COMPATIBILITY_VIUTV)
 
     execute {
-        // Hook 1: onPlay -> 開 auto-enter（16:9）。
+        // 先加 helper method（Hook 1 會 call 佢）。
+        addMorpheUpdatePipParamsMethod()
+
+        // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
+        // Register 分析（已核實）：呢個 method 一共用 6 個 register，
+        // v4 = this，v0 借嚟裝 activity；call 完 helper 就唔再用 v0。
         ReactJWPlayerViewOnPlayFingerprint.method.apply {
             val playingIndex = indexOfFirstInstructionOrThrow(
                 methodCall(
@@ -151,27 +279,11 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             addInstructionsWithLabels(
                 playingIndex + 1,
                 """
-                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
-                    const/16 v1, 0x1f
-                    if-lt v0, v1, :pip_done
                     iget-object v0, v4, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
                     invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
                     move-result-object v0
                     if-eqz v0, :pip_done
-                    new-instance v1, Landroid/app/PictureInPictureParams${'$'}Builder;
-                    invoke-direct {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;-><init>()V
-                    const/4 v2, 0x1
-                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams${'$'}Builder;
-                    move-result-object v1
-                    new-instance v2, Landroid/util/Rational;
-                    const/16 v3, 0x10
-                    const/16 v5, 0x9
-                    invoke-direct {v2, v3, v5}, Landroid/util/Rational;-><init>(II)V
-                    invoke-virtual {v1, v2}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAspectRatio(Landroid/util/Rational;)Landroid/app/PictureInPictureParams${'$'}Builder;
-                    move-result-object v1
-                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->build()Landroid/app/PictureInPictureParams;
-                    move-result-object v1
-                    invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
+                    invoke-virtual {v4, v0}, Lcom/viutv/ReactJWPlayerView;->morpheUpdatePipParams(Landroid/app/Activity;)V
                     :pip_done
                     nop
                 """
@@ -225,6 +337,28 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     return-void
                     :pip_orig
                     nop
+                """
+            )
+        }
+
+        // Hook 4: onHostResume -> refresh 個 player view，等 PiP 返出嚟
+        // 畫面唔好凍住。forceRefreshPlayerLayout() 係 ViuTV 自己嘅 helper：
+        // 200ms 後 invalidate + requestLayout。每次 resume 都行一次，
+        // layout 本來啱嘅話係無視覺變化嘅。
+        // Register 分析（已核實）：呢個 method 一共用 3 個 register，
+        // v2 = this；插入點喺 setPlay(true) 之後，v0、v1 已經死晒，
+        // 直接 call 唔使借 register。
+        ReactJWPlayerViewOnHostResumeFingerprint.method.apply {
+            val setPlayIndex = indexOfFirstInstructionOrThrow(
+                methodCall(
+                    "Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V"
+                )
+            )
+
+            addInstructions(
+                setPlayIndex + 1,
+                """
+                    invoke-virtual {v2}, Lcom/viutv/ReactJWPlayerView;->forceRefreshPlayerLayout()V
                 """
             )
         }
