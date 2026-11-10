@@ -80,6 +80,9 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 至少要有一行 instruction；label 喺 block 最尾、後面乜都無，就會
  * IndexOutOfBoundsException（length 0）成個 patch fail。所以下面三個
  * hook 嘅 :pip_done / :pip_orig 後面全部有一個 nop 墊底，唔好刪。
+ * （2026-11-11 Build #56 撞過）const/4 只裝到 -8 至 7，GONE（8）
+ * 一定要用 const/16，寫 const/4 v1, 0x8 會 parse 失敗，成個 patch
+ * 跌埋。VISIBLE（0）用 const/4 無問題。
  *
  * 唔改嘅嘢：
  * - 唔掂 JWPlayer SDK 內部（m.b / isPipIconVisible / CenterControlsView），
@@ -259,9 +262,10 @@ private object ReactJWPlayerViewOnHostResumeFingerprint : Fingerprint(
         methodCall(
             "Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V"
         ),
-        methodCall(
-            "Landroidx/lifecycle/LifecycleRegistry;->setCurrentState(Landroidx/lifecycle/Lifecycle\$State;)V"
-        ),
+        // 注意：唔好加 LifecycleRegistry.setCurrentState 做 filter。
+        // 2026-11-11 Build #56 嗰陣，加咗呢個 filter（入面有 Lifecycle$State）
+        // 之後成個 fingerprint match 唔到。名 + class + signature
+        // 已經唯一識別到呢個 method，setPlay 一個 filter 就夠。
     )
 )
 
@@ -370,7 +374,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
                     move-result-object v0
                     if-eqz v0, :pip_hide_done
-                    const/4 v1, 0x8
+                    const/16 v1, 0x8
                     invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
                     :pip_hide_done
                     return-void
