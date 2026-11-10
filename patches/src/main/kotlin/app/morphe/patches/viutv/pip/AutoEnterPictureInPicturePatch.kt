@@ -69,6 +69,12 @@ import app.morphe.util.indexOfFirstInstructionOrThrow
  *    - 呢個 method 一共用 3 個 register：v0–v1 係 locals，v2 = this。
  *    - 插入點嗰陣：v0、v1 未用過，可以安全借用。
  *
+ * 寫法注意（2026-11-10 Build #54 撞過）：
+ * addInstructionsWithLabels 要求每個 label 後面喺同一個插入 block 入面
+ * 至少要有一行 instruction；label 喺 block 最尾、後面乜都無，就會
+ * IndexOutOfBoundsException（length 0）成個 patch fail。所以下面三個
+ * hook 嘅 :pip_done / :pip_orig 後面全部有一個 nop 墊底，唔好刪。
+ *
  * 唔改嘅嘢：
  * - 唔掂 JWPlayer SDK 內部（m.b / isPipIconVisible / CenterControlsView），
  *   唔掂任何 DRM（Widevine）code，唔掂 JS bundle。
@@ -167,6 +173,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     move-result-object v1
                     invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
                     :pip_done
+                    nop
                 """
             )
         }
@@ -195,6 +202,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     move-result-object v1
                     invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
                     :pip_orig
+                    nop
                 """
             )
         }
@@ -216,6 +224,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     if-eqz v1, :pip_orig
                     return-void
                     :pip_orig
+                    nop
                 """
             )
         }
