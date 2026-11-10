@@ -302,34 +302,17 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 如果都係停，兇手就喺 Hook 2／3／4 入面。臨時改動，測完還原。
         // （原本嘅 Hook 1 code 喺 git 入面，commit 7f3b79b／188bfa4 有齊。）
 
-        // Hook 2: setPlay(false) -> 閂 auto-enter。
-        ReactJWPlayerViewSetPlayFingerprint.method.apply {
-            addInstructionsWithLabels(
-                0,
-                """
-                    if-nez v3, :pip_clear
-                    goto :pip_orig
-                    :pip_clear
-                    sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
-                    const/16 v1, 0x1f
-                    if-lt v0, v1, :pip_orig
-                    iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
-                    invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
-                    move-result-object v0
-                    if-eqz v0, :pip_orig
-                    new-instance v1, Landroid/app/PictureInPictureParams${'$'}Builder;
-                    invoke-direct {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;-><init>()V
-                    const/4 v3, 0x0
-                    invoke-virtual {v1, v3}, Landroid/app/PictureInPictureParams${'$'}Builder;->setAutoEnterEnabled(Z)Landroid/app/PictureInPictureParams${'$'}Builder;
-                    move-result-object v1
-                    invoke-virtual {v1}, Landroid/app/PictureInPictureParams${'$'}Builder;->build()Landroid/app/PictureInPictureParams;
-                    move-result-object v1
-                    invoke-virtual {v0, v1}, Landroid/app/Activity;->setPictureInPictureParams(Landroid/app/PictureInPictureParams;)V
-                    :pip_orig
-                    nop
-                """
-            )
-        }
+        // DIAGNOSTIC (bisect 3): Hook 2 已停用。
+        // Bisect 2（無 Hook 1，留 Hook 2／3／4）都係停，即係 Hook 1 無辜。
+        // 而 v2（Hook 1／2／3）都停，但 v2.1 先有 Hook 4，所以 Hook 4
+        // 唔可能係 v2 嗰陣嘅兇手；兇手喺 Hook 2 或 Hook 3 入面。
+        // Hook 3 喺無 PiP 嘅情況下只係讀一次 PiP mode 再落返去原本
+        // 嗰個 pause，乜都無改過，唔可能搞停佢；Hook 2 係唯一一個喺
+        // background 嗰條路上面會主動 call setPictureInPictureParams
+        // 嘅 hook，所以先停佢。呢個版淨係留 Hook 3／4。
+        // 如果播得返，兇手就係 Hook 2；如果都係停，兇手就係 Hook 3
+        // （或者 Hook 2＋3 嘅組合）。臨時改動，測完還原。
+        // （原本嘅 Hook 2 code 喺 git 入面，commit 7f3b79b 有齊。）
 
         // Hook 3: onHostPause -> 入咗 PiP 就唔 pause，兼收起啲功能制。
         // 啲制喺 PiP 入面唔會自己消失（auto-hide 計時器喺 pause 嗰陣停
