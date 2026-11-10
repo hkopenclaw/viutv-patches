@@ -1,11 +1,11 @@
 package app.morphe.patches.viutv.pip
 
 import app.morphe.patcher.Fingerprint
-import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructionsWithLabels
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.mutableClassDefBy
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import app.morphe.patches.viutv.shared.Constants.COMPATIBILITY_VIUTV
 import app.morphe.util.indexOfFirstInstructionOrThrow
 import com.android.tools.smali.dexlib2.AccessFlags
@@ -116,6 +116,32 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  *    每次 resume 都行一次，layout 本來啱嘅話係無視覺變化嘅。
  *    仲未分到凍結嗰陣聲音有無繼續（surface 問題定係真係 pause 咗）；
  *    如果 v2.1 之後仲凍，就要問埋呢樣再查。
+ *    （2026-11-11 01:02 用戶覆：無聲，成個串流停埋——即係唔係淨係
+ *    surface 凍，係個 player 真係停咗。見下面問題 2 嘅跟進。）
+ * 3) 入 PiP 嗰刻畫面上面嗰啲功能制（從頭開始／切換頻道／全螢幕嗰啲）
+ *    如果仲顯示緊，入咗 PiP 之後唔會自己消失（要捉住佢哋自動收起
+ *    咗嗰一刻先入先乾淨）。原因：JWPlayer 嗰個 controls auto-hide
+ *    計時器喺 activity pause 嗰陣會停，入咗 PiP 之後唔會再行，所以
+ *    啲制凍住喺度。修正：入 PiP 嗰陣（hook 3 嗰條路）直接將成個
+ *    ControlsContainerView 隱藏（setVisibility GONE），返出嚟嗰陣
+ *    （hook 4）再顯示返，之後 auto-hide 計時器會照常喺幾秒後收起佢。
+ *    用嘅係 JWPlayer 公開 API（JWPlayerView.getControlsContainer）
+ *    加 View.setVisibility，唔使掂混淆咗嘅 controls controller。
+ *
+ * 問題 2 跟進（2026-11-11 01:02–01:04，仲查緊）：
+ * 用戶話返出嚟係無聲、成個串流停埋。對過 code：
+ * - onDetachedFromWindow 只係 call onStopPlayback（淨係熄 keepScreenOn，
+ *   唔會停 player），唔係兇手。
+ * - 真正殺 player 嘅係 releasePlayer()：pause + stop + 用空 config
+ *   重新 setup + player = null + 拆走 playerView。行完之後 setPlay(true)
+ *   會因為 player 係 null 而直接 return，撳播放都救唔返——同用戶
+ *   「要重新出去入番先得」吻合（出入畫面先會重新 createPlayer）。
+ * - releasePlayer 嘅 caller 係 stopPlayback()，而 stopPlayback 嘅 caller
+ *   係 onHostDestroy（activity 毀滅先行，PiP 返出嚟唔會行）同埋
+ *   ReactJWPlayerManager.receiveCommand／createViewInstance（JS／RN
+ *   嗰邊嘅指令）。邊一個喺 PiP 返出嚟嗰陣行，靜態睇唔到，要用
+ *   logcat（REACT_JWPLAYER_VIEW tag）先分到。下一個 build 之後
+ *   如果仲停，就要捉 log。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -319,7 +345,12 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             )
         }
 
-        // Hook 3: onHostPause -> 入咗 PiP 就唔 pause。
+        // Hook 3: onHostPause -> 入咗 PiP 就唔 pause，兼收起啲功能制。
+        // 啲制喺 PiP 入面唔會自己消失（auto-hide 計時器喺 pause 嗰陣停
+        // 咗），所以入 PiP 嗰陣直接將成個 ControlsContainerView 隱藏。
+        // Register 分析（已核實）：呢個 method 一共用 3 個 register，
+        // v2 = this；v0 喺 isInPictureInPictureMode 之後已經死晒，可以
+        // 借嚟裝 playerView／container，v1 借嚟裝 GONE 常數 8。
         ReactJWPlayerViewOnHostPauseFingerprint.method.apply {
             addInstructionsWithLabels(
                 0,
@@ -334,6 +365,14 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-virtual {v0}, Landroid/app/Activity;->isInPictureInPictureMode()Z
                     move-result v1
                     if-eqz v1, :pip_orig
+                    iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->playerView:Lcom/jwplayer/pub/view/JWPlayerView;
+                    if-eqz v0, :pip_hide_done
+                    invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
+                    move-result-object v0
+                    if-eqz v0, :pip_hide_done
+                    const/4 v1, 0x8
+                    invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
+                    :pip_hide_done
                     return-void
                     :pip_orig
                     nop
@@ -342,12 +381,14 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         }
 
         // Hook 4: onHostResume -> refresh 個 player view，等 PiP 返出嚟
-        // 畫面唔好凍住。forceRefreshPlayerLayout() 係 ViuTV 自己嘅 helper：
-        // 200ms 後 invalidate + requestLayout。每次 resume 都行一次，
-        // layout 本來啱嘅話係無視覺變化嘅。
+        // 畫面唔好凍住，兼將啲功能制顯示返。
+        // forceRefreshPlayerLayout() 係 ViuTV 自己嘅 helper：200ms 後
+        // invalidate + requestLayout。每次 resume 都行一次，layout 本來
+        // 啱嘅話係無視覺變化嘅。顯示返啲制之後，auto-hide 計時器會照常
+        // 喺幾秒後收起佢。
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
         // v2 = this；插入點喺 setPlay(true) 之後，v0、v1 已經死晒，
-        // 直接 call 唔使借 register。
+        // 可以借嚟裝 playerView／container／VISIBLE 常數 0。
         ReactJWPlayerViewOnHostResumeFingerprint.method.apply {
             val setPlayIndex = indexOfFirstInstructionOrThrow(
                 methodCall(
@@ -355,10 +396,19 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                 )
             )
 
-            addInstructions(
+            addInstructionsWithLabels(
                 setPlayIndex + 1,
                 """
                     invoke-virtual {v2}, Lcom/viutv/ReactJWPlayerView;->forceRefreshPlayerLayout()V
+                    iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->playerView:Lcom/jwplayer/pub/view/JWPlayerView;
+                    if-eqz v0, :pip_show_done
+                    invoke-virtual {v0}, Lcom/jwplayer/pub/view/JWPlayerView;->getControlsContainer()Lcom/jwplayer/ui/views/ControlsContainerView;
+                    move-result-object v0
+                    if-eqz v0, :pip_show_done
+                    const/4 v1, 0x0
+                    invoke-virtual {v0, v1}, Landroid/view/View;->setVisibility(I)V
+                    :pip_show_done
+                    nop
                 """
             )
         }
