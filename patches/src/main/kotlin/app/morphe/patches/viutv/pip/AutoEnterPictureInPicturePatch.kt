@@ -224,6 +224,31 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 用同一個 logcat filter 就捉到）；Hook 5（onUserLeaveHint）開頭
  * 印一句；Hook 3（onHostPause）印 flag 值同 isInPictureInPictureMode()
  * 嘅值。等主機 log 返嚟先知下一步點 fix。
+ *
+ * v2.6 diagnostic 結果（2026-11-11 20:01，用戶交 pip-home__1.log，
+ * 主機 tag 18）：
+ * 「morphe onUserLeaveHint fired」成個 log 完全無出現——即係主機
+ * （Android 16）撳 Home 入 auto-enter PiP 嗰陣，ReactActivity
+ * .onUserLeaveHint 根本無行（唔係 timing 問題，係從來無行）。
+ * Hook 3 嗰陣：flag=false、isInPiP=false，跟住 onHostPause →
+ * setPlay(false) 照 pause。結論：v2.5 個 flag approach 喺
+ * Android 16 行唔通，因為系統喺 auto-enter PiP flow 入面唔叫
+ * onUserLeaveHint。另核實：onPictureInPictureModeChanged 淨係得
+ * framework Activity 有，ReactActivity／MainActivity 無 override，
+ * 唔可以直接 hook。
+ *
+ * v2.7 diagnostic（2026-11-11，用戶批准「核實」之後）：
+ * 轉方向：唔再靠喺 onHostPause 嗰陣 prevent pause，改為入咗 PiP
+ * 之後先 resume。候選 signal 係 MainActivity.onConfigurationChanged
+ * ——入 PiP 會令個 activity 視窗大細變，應該會觸發 config change。
+ * MainActivity 有 override onConfigurationChanged（7 個 method 之一，
+ * 已核實：4 個 register，v2=this，v3=Configuration；body 係
+ * super call＋new Intent("onConfigurationChanged")＋putExtra("newConfig")
+ * ＋sendBroadcast）。Hook 6 喺佢開頭印 isInPictureInPictureMode()
+ * 嘅值，等主機 log 返嚟就知：入 PiP 嗰陣 onConfigurationChanged
+ * 有無行、行嗰陣 isInPiP 係咪 true。如果係，v2.8 就可以喺呢度
+ * resume 個 player（setPlay(true)）；如果唔係，就要搵第二個 signal。
+ * v2.7 淨係加 log，唔改任何行為（唔 resume）。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -593,6 +618,25 @@ private object ReactActivityOnUserLeaveHintFingerprint : Fingerprint(
     )
 )
 
+// v2.7：MainActivity.onConfigurationChanged。MainActivity 有 override 呢個
+// （7 個 method 之一，已核實：4 個 register，8 行 instruction，body 係
+// super call＋new Intent("onConfigurationChanged")＋putExtra("newConfig")
+// ＋sendBroadcast）。入 PiP 會令個 activity 視窗大細變，應該會觸發
+// config change。個 filter 就係 sendBroadcast 嗰句。
+// Register：4 個（v0–v1 locals，v2 = this，v3 = Configuration 參數），
+// position 0 嗰陣 v0、v1 未用過。
+private object MainActivityOnConfigurationChangedFingerprint : Fingerprint(
+    definingClass = "Lcom/viutv/MainActivity;",
+    name = "onConfigurationChanged",
+    returnType = "V",
+    parameters = listOf("Landroid/content/res/Configuration;"),
+    filters = listOf(
+        methodCall(
+            "Landroid/content/Context;->sendBroadcast(Landroid/content/Intent;)V"
+        ),
+    )
+)
+
 val autoEnterPictureInPicturePatch = bytecodePatch(
     name = "Auto-enter Picture-in-Picture (JWPlayer)",
     description = "Makes the JWPlayer enter Picture-in-Picture automatically when " +
@@ -784,6 +828,9 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 如果主機 log 有呢句但 Hook 3 讀到 flag 係 false，即係 flag 寫入／
         // 讀出有問題；如果連呢句都無，即係 Android 16 撳 Home 根本無行
         // onUserLeaveHint（或者行咗第二個 onUserLeaveHint）。
+        // v2.6 diagnostic 結果（2026-11-11）：主機 log 完全無呢句，即係
+        // Android 16 撳 Home 入 auto-enter PiP 嗰陣根本唔叫 onUserLeaveHint。
+        // 呢個 hook 留喺度（副機 SDK 35 嗰邊可能仲有用），但主機唔可以靠佢。
         // Register 分析（已核實）：呢個 method 一共用 2 個 register，
         // v1 = this，v0 係 local；position 0 嗰陣 v0 未用過，借嚟裝字串／
         // true（1）。v1（this）一路唔掂，原本嘅 super＋delegate call 照用。
@@ -795,6 +842,32 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
                     const/4 v0, 0x1
                     sput-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
+                """
+            )
+        }
+
+        // Hook 6 (v2.7 diagnostic): MainActivity.onConfigurationChanged ->
+        // 印 isInPictureInPictureMode() 嘅值。
+        // 用途：核實入 PiP 嗰陣 onConfigurationChanged 有無行、行嗰陣
+        // isInPiP 係咪 true。如果係，v2.8 就可以喺呢度 resume 個 player。
+        // v2.7 淨係印 log，唔 resume、唔改任何行為。
+        // Register 分析（已核實）：呢個 method 一共用 4 個 register，
+        // v2 = this，v3 = Configuration 參數；position 0 嗰陣 v0、v1
+        // 未用過。v0 裝 isInPiP boolean，之後轉做字串；v1 裝 label 字串。
+        // 之後原本嘅 code 會再用 v0／v1 做 Intent，嗰陣我哋啲值已經死晒，
+        // 唔會有衝突。isInPictureInPictureMode() 係 Activity 嘅 method，
+        // 所以 invoke 嗰陣用 Landroid/app/Activity 呢個 class。
+        MainActivityOnConfigurationChangedFingerprint.method.apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    invoke-virtual {v2}, Landroid/app/Activity;->isInPictureInPictureMode()Z
+                    move-result v0
+                    const-string v1, "morphe onConfigurationChanged isInPiP="
+                    invoke-static {v1}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
+                    invoke-static {v0}, Ljava/lang/String;->valueOf(Z)Ljava/lang/String;
+                    move-result-object v0
+                    invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
                 """
             )
         }
