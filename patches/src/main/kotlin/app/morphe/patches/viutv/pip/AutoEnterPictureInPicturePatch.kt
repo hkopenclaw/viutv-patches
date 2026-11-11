@@ -279,6 +279,16 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 預期效果：撳 Home 之後條片會停大約 0.12 秒（onHostPause 嗰陣照
  * pause），跟住入咗 PiP 嗰陣 onConfigurationChanged 就 resume 返。
  * 嗰一下短暫停頓係預期之內，唔係 bug。
+ *
+ * v2.8 回歸（2026-11-11 22:04，用戶報）：tag 20 入 app 正常，
+ * 揀串流直播 channel 就 force close，第一次出現。核實咗 tag 20
+ * 嘅 DEX，搵到兇手：morpheResumePlayer 入面用 invoke-virtual 去
+ * call private setPlay(Z)，但原版 code（onHostPause／onHostResume）
+ * 係用 invoke-direct 嚟 call 呢個 private method。invoke-virtual
+ * 叫 private method 係 Dalvik verification error（VerifyError），
+ * 個 class 喺第一次 load 嗰陣就 fail——即係揀 channel、建立個
+ * player view 嗰陣就 crash；入 app 嗰陣個 class 仲未 load，所以
+ * 無事。v2.9 修正：將 morpheResumePlayer 入面嗰句改做 invoke-direct。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -491,6 +501,12 @@ private fun addMorpheLogMethod() {
  * 呢個 wrapper 同 setPlay 係同一個 class，call 到。一定要 public：
  * call 佢嗰個係 MainActivity。setPlay(true) 嗰陣 player 已經播緊
  * 就係 no-op，所以唔使再 check 狀態。
+ * 一定要用 invoke-direct，唔可以用 invoke-virtual：setPlay 係 private，
+ * 原版 code（onHostPause／onHostResume）都係用 invoke-direct 嚟 call 佢。
+ * invoke-virtual 叫 private method 係 Dalvik verification error，成個
+ * class 喺第一次 load 嗰陣就 fail（v2.8 tag 20 揀直播 channel 就
+ * force close 嘅原因，2026-11-11 22:04 用戶報，核實咗 DEX 先搵到）。
+ * v2.9 就係修正呢個字（virtual→direct），其他嘢唔郁。
  * Register：1 個（v0 local 裝 true，p0 = this）。
  */
 private fun addMorpheResumePlayerMethod() {
@@ -509,7 +525,7 @@ private fun addMorpheResumePlayerMethod() {
                 0,
                 """
                     const/4 v0, 0x1
-                    invoke-virtual {p0, v0}, Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V
+                    invoke-direct {p0, v0}, Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V
                     return-void
                 """
             )
