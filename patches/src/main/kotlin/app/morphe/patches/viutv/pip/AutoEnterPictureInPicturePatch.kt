@@ -208,6 +208,22 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 繼續播（有聲）。但 auto-enter 開住嗰陣，撳 Home 系統一定會入
  * PiP（除非 PiP 俾人閂咗），而用戶兩部機都核實過 PiP work，所以
  * 呢個情況唔會撞到；返嚟嗰陣 onHostResume 會清返個 flag。
+ *
+ * v2.6 diagnostic（2026-11-11，用戶喺主機實測 v2.5 之後）：
+ * v2.5 喺主機無效。pip-home.log（19:03:41–19:03:46，主機，直播
+ * 7 點新聞）證實：onHostPause 行咗，跟住即刻 setPlay(false)——
+ * 即係 Hook 3 個 guard 無 skip 到 pause。換句話說，onHostPause
+ * 嗰陣 morpheUserLeaving 係 false，而且 isInPictureInPictureMode()
+ * 都係 false。呢個 log 排除咗「pause 經第二條路」呢個可能（兇手
+ * 的確係 onHostPause → setPlay(false)），但睇唔到 onUserLeaveHint
+ * 有無行（佢唔係 REACT_JWPLAYER_VIEW 嗰個 tag，唔會出現喺呢個
+ * log 入面），所以分唔到係 onUserLeaveHint 根本無行，定係有行但
+ * 個 flag 無 set 到／無讀到。
+ * v2.6 淨係加 diagnostic log，唔改任何行為：新加一個 static helper
+ * morpheLog(String)（Log.d，tag 係 REACT_JWPLAYER_VIEW，等用戶
+ * 用同一個 logcat filter 就捉到）；Hook 5（onUserLeaveHint）開頭
+ * 印一句；Hook 3（onHostPause）印 flag 值同 isInPictureInPictureMode()
+ * 嘅值。等主機 log 返嚟先知下一步點 fix。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -345,6 +361,40 @@ private fun addMorpheUserLeavingField() {
             ).toMutable()
         )
     }
+}
+
+/**
+ * 喺 ReactJWPlayerView 加一個 public static helper method：
+ *   public static morpheLog(String msg)
+ *
+ * v2.6 diagnostic（2026-11-11）：用 Log.d 將 msg 寫去 logcat，tag 係
+ * "REACT_JWPLAYER_VIEW"，等用戶用同一個 logcat filter（-s
+ * REACT_JWPLAYER_VIEW）就捉到。Hook 5 同 Hook 3 用佢嚟印 diagnostic。
+ * 一定要 public static：call 佢嗰個包括 ReactActivity（另一個 class）。
+ * Register：2 個（v0 local 裝 tag，p0 = msg 參數）。
+ */
+private fun addMorpheLogMethod() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").methods.add(
+        ImmutableMethod(
+            "Lcom/viutv/ReactJWPlayerView;",
+            "morpheLog",
+            listOf(ImmutableMethodParameter("Ljava/lang/String;", null, null)),
+            "V",
+            AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+            null,
+            null,
+            MutableMethodImplementation(3),
+        ).toMutable().apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    const-string v0, "REACT_JWPLAYER_VIEW"
+                    invoke-static {v0, p0}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+                    return-void
+                """
+            )
+        }
+    )
 }
 
 /**
@@ -553,11 +603,13 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
 
     execute {
         // 先加 helper method（Hook 1 會 call 佢）同埋 v2.4 嘅 field＋helper、
-        // v2.5 嘅 static flag field（Hook 5 會 set 佢，Hook 3 會讀佢）。
+        // v2.5 嘅 static flag field（Hook 5 會 set 佢，Hook 3 會讀佢），
+        // v2.6 嘅 log helper（Hook 5 同 Hook 3 會 call 佢印 diagnostic）。
         addMorpheUpdatePipParamsMethod()
         addMorpheHiddenViewsField()
         addMorpheSetPipUiHiddenMethod()
         addMorpheUserLeavingField()
+        addMorpheLogMethod()
 
         // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
         // Register 分析（已核實）：呢個 method 一共用 6 個 register，
@@ -611,9 +663,21 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // onPause／onHostPause 之前行，所以個 flag 一定趕得切。
         // （v2.4 之前呢度係 inline hide 個 ControlsContainerView，
         // 而家搬咗入 morpheSetPipUiHidden，連 nav bar 一齊處理。）
+        // v2.6 diagnostic：pip-home.log 證實 v2.5 喺主機無 skip 到 pause，
+        // 但睇唔到 onUserLeaveHint 有無行。所以呢度加 log：讀 flag 嗰陣
+        // 印埋個 flag 值（兩行：label 一行，true/false 一行），讀
+        // isInPictureInPictureMode() 嗰陣同樣印埋個值。咁樣主機 log
+        // 返嚟就知 guard 嗰陣見到啲咩，再加埋 Hook 5 嗰句就分到係
+        // onUserLeaveHint 無行，定係有行但 flag 無 set 到／無讀到。
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
         // v2 = this；開頭 v0 未用過，借嚟裝 boolean（true = 1）。
         // 之後 v0 會俾 SDK 檢查覆寫，唔會有衝突。
+        // Log 嗰陣嘅 register：讀 flag 嗰段，v0 係 flag boolean，v1
+        // 嗰陣已經唔再要（SDK 比較用完），借 v1 裝 label 字串；印完
+        // boolean 字串之後要重新 sget 個 flag 返嚟（v0 嗰陣已經變咗
+        // 字串）。讀 PiP 嗰段，v1 係 PiP boolean，v0 嗰陣已經唔再要
+        // （Activity ref 用完），借 v0 裝 label 字串；v1 一路保留住
+        // PiP boolean 俾之後嘅 if-eqz 用。
         // 注意 if 指令嘅語義：if-nez = jump if != 0；if-eqz = jump if == 0。
         // 「flag 係 true（v0 != 0）就跳去 skip pause」要用 if-nez。
         ReactJWPlayerViewOnHostPauseFingerprint.method.apply {
@@ -626,6 +690,12 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     const/16 v1, 0x1a
                     if-lt v0, v1, :pip_orig
                     sget-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
+                    const-string v1, "morphe onHostPause flag="
+                    invoke-static {v1}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
+                    invoke-static {v0}, Ljava/lang/String;->valueOf(Z)Ljava/lang/String;
+                    move-result-object v0
+                    invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
+                    sget-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
                     if-nez v0, :pip_skip_pause
                     iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
                     invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
@@ -633,6 +703,11 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     if-eqz v0, :pip_orig
                     invoke-virtual {v0}, Landroid/app/Activity;->isInPictureInPictureMode()Z
                     move-result v1
+                    const-string v0, "morphe onHostPause isInPiP="
+                    invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
+                    invoke-static {v1}, Ljava/lang/String;->valueOf(Z)Ljava/lang/String;
+                    move-result-object v0
+                    invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
                     if-eqz v1, :pip_orig
                     :pip_skip_pause
                     return-void
@@ -704,12 +779,20 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 喺 method 開頭將 ReactJWPlayerView 嗰個 static flag set 做 true，
         // 等 Hook 3（onHostPause）嗰陣就算 PiP state 仲未落地，都識得 skip pause。
         // 之後原本嘅 super call＋delegate call 照行，唔會影響 React Native 嗰邊。
+        // v2.6 diagnostic：pip-home.log 睇唔到 onUserLeaveHint 有無行，所以
+        // 喺 set flag 之前加多句 morpheLog，印「onUserLeaveHint fired」。
+        // 如果主機 log 有呢句但 Hook 3 讀到 flag 係 false，即係 flag 寫入／
+        // 讀出有問題；如果連呢句都無，即係 Android 16 撳 Home 根本無行
+        // onUserLeaveHint（或者行咗第二個 onUserLeaveHint）。
         // Register 分析（已核實）：呢個 method 一共用 2 個 register，
-        // v1 = this，v0 係 local；position 0 嗰陣 v0 未用過，借嚟裝 true（1）。
+        // v1 = this，v0 係 local；position 0 嗰陣 v0 未用過，借嚟裝字串／
+        // true（1）。v1（this）一路唔掂，原本嘅 super＋delegate call 照用。
         ReactActivityOnUserLeaveHintFingerprint.method.apply {
             addInstructionsWithLabels(
                 0,
                 """
+                    const-string v0, "morphe onUserLeaveHint fired"
+                    invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
                     const/4 v0, 0x1
                     sput-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
                 """
