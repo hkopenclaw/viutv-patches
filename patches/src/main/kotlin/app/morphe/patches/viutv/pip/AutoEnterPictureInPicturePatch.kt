@@ -181,6 +181,33 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 嗰個前提係錯嘅，Full Screen 從來無壞過。v2.3 嗰版（tag 15）
  * 唔使裝，留喺 v2.2（tag 14）就得；v2.4 係喺 v2.2 嘅行為上面加
  * hide／restore，唔會還原嗰句強制 VISIBLE。
+ *
+ * v2.5（2026-11-11，用戶喺主機實測 v2.4 之後）：
+ * 主機（POCO F2 Pro，LineageOS 23.2，SDK 36／Android 16）撳 Home
+ * 直接入 PiP 會停播；副機（Mi MIX 2，SDK 35／Android 15）v2.4
+ * 四樣都 work。原因係 race：Hook 3 喺 onHostPause 嗰陣靠
+ * isInPictureInPictureMode() 決定跳唔跳過 pause，但撳 Home 嗰陣，
+ * onHostPause 幾時行、PiP state 幾時落地，兩者嘅先後次序係睇
+ * Android 版本／ROM。副機嗰陣 PiP state 趕得切喺 onHostPause 之前
+ * 落地，guard 讀到 true 就 skip pause；主機嗰陣 onHostPause 行先
+ * 過 PiP state 落地，guard 讀到 false 就照行 setPlay(false)。
+ * （推論，未喺主機上面實證個 race，但機制同觀察到嘅嘢吻合。）
+ * 修正：唔再淨係靠 isInPictureInPictureMode()。新加一個 public
+ * static boolean field morpheUserLeaving（喺 ReactJWPlayerView），
+ * 再 hook ReactActivity.onUserLeaveHint()（MainActivity 繼承佢，
+ * MainActivity 自己無 override onUserLeaveHint，所以 framework 叫
+ * 嗰陣會行 ReactActivity 呢個；核實過 MainActivity 得 7 個 method，
+ * 無 onUserLeaveHint）。撳 Home／離開 activity 嗰陣，
+ * onUserLeaveHint 一定喺 onPause／onHostPause 之前行，喺嗰度將
+ * morpheUserLeaving set 做 true；Hook 3 除咗 check
+ * isInPictureInPictureMode 之外，再 check 呢個 flag，兩個任何
+ * 一個 true 就 skip pause。Hook 4（onHostResume 開頭）將個 flag
+ * 清返 false。
+ * 邊界情況：如果撳 Home 之後 PiP 最終無入到（例如系統 PiP 俾人閂
+ * 咗），個 flag 會令 onHostPause 跳過 pause，條片會喺 background
+ * 繼續播（有聲）。但 auto-enter 開住嗰陣，撳 Home 系統一定會入
+ * PiP（除非 PiP 俾人閂咗），而用戶兩部機都核實過 PiP work，所以
+ * 呢個情況唔會撞到；返嚟嗰陣 onHostResume 會清返個 flag。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -279,6 +306,39 @@ private fun addMorpheHiddenViewsField() {
                 "morpheHiddenViews",
                 "Ljava/util/ArrayList;",
                 AccessFlags.PRIVATE.value,
+                null,
+                null,
+                null
+            ).toMutable()
+        )
+    }
+}
+
+/**
+ * 喺 ReactJWPlayerView 加一個 public static field：
+ *   public static boolean morpheUserLeaving
+ *
+ * v2.5（2026-11-11）：用嚟避開 onHostPause 嗰個 PiP race。
+ * ReactActivity.onUserLeaveHint()（MainActivity 繼承佢）喺用戶撳 Home／
+ * 離開 activity 嗰陣 set 佢做 true；ReactJWPlayerView.onHostPause 喺
+ * 決定跳唔跳過 pause 嗰陣，除咗 check isInPictureInPictureMode 之外，
+ * 再 check 呢個 flag；onHostResume 喺開頭清返佢做 false。
+ * 一定要 public static：set 佢嗰個係 ReactActivity（另一個 class），
+ * 唔係 ReactJWPlayerView 自己；private 的話第二個 class 掂唔到。
+ * Static boolean 預設值係 false，唔使 static initializer。
+ * （加 field 嘅寫法抄 ref 嘅 ForceOriginalAudioPatch；要同時 import
+ * MutableField.Companion.toMutable 同 MutableMethod.Companion.toMutable，
+ * 淨係 import Method 嗰個會令 fields.add() compile 唔到——v1.1.9
+ * Build #18 撞過。）
+ */
+private fun addMorpheUserLeavingField() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").apply {
+        fields.add(
+            ImmutableField(
+                "Lcom/viutv/ReactJWPlayerView;",
+                "morpheUserLeaving",
+                "Z",
+                AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
                 null,
                 null,
                 null
@@ -466,6 +526,23 @@ private object ReactJWPlayerViewOnHostResumeFingerprint : Fingerprint(
     )
 )
 
+// v2.5：ReactActivity.onUserLeaveHint。MainActivity 繼承 ReactActivity，
+// MainActivity 自己無 override onUserLeaveHint（核實過，得 7 個 method），
+// 所以 framework 撳 Home 嗰陣會行呢個。佢嘅 body 係 super call 加
+// ReactActivityDelegate.onUserLeaveHint()，個 filter 就係後者。
+// Register：2 個（v0 local，v1 = this），position 0 嗰陣 v0 未用過。
+private object ReactActivityOnUserLeaveHintFingerprint : Fingerprint(
+    definingClass = "Lcom/facebook/react/ReactActivity;",
+    name = "onUserLeaveHint",
+    returnType = "V",
+    parameters = listOf(),
+    filters = listOf(
+        methodCall(
+            "Lcom/facebook/react/ReactActivityDelegate;->onUserLeaveHint()V"
+        ),
+    )
+)
+
 val autoEnterPictureInPicturePatch = bytecodePatch(
     name = "Auto-enter Picture-in-Picture (JWPlayer)",
     description = "Makes the JWPlayer enter Picture-in-Picture automatically when " +
@@ -475,10 +552,12 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
     compatibleWith(COMPATIBILITY_VIUTV)
 
     execute {
-        // 先加 helper method（Hook 1 會 call 佢）同埋 v2.4 嘅 field＋helper。
+        // 先加 helper method（Hook 1 會 call 佢）同埋 v2.4 嘅 field＋helper、
+        // v2.5 嘅 static flag field（Hook 5 會 set 佢，Hook 3 會讀佢）。
         addMorpheUpdatePipParamsMethod()
         addMorpheHiddenViewsField()
         addMorpheSetPipUiHiddenMethod()
+        addMorpheUserLeavingField()
 
         // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
         // Register 分析（已核實）：呢個 method 一共用 6 個 register，
@@ -522,12 +601,21 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
         // 咁做係為咗唔使依賴 isInPictureInPictureMode 喺 onHostPause
         // 嗰刻讀到嘅 timing——就算 PiP mode 嗰刻仲未 set 好，啲 UI
         // 都已經匿埋咗。還原係 Hook 4 嗰邊做。
-        // PiP guard 唔變：入咗 PiP 就 return，唔行原本嘅 setPlay(false)。
+        // PiP guard（v2.5 改過）：入咗 PiP 或者用戶撳咗 Home（morpheUserLeaving
+        // flag，Hook 5 喺 onUserLeaveHint 嗰度 set）就 return，唔行原本嘅
+        // setPlay(false)。兩個條件任何一個 true 都 skip pause。
+        // 點解要加個 flag：v2.4 淨係靠 isInPictureInPictureMode()，但撳 Home
+        // 嗰陣 onHostPause 幾時行、PiP state 幾時落地，兩者嘅先後次序係睇
+        // Android 版本／ROM——主機（Android 16）onHostPause 行先過 PiP
+        // state 落地，guard 讀到 false 就照 pause。onUserLeaveHint 一定喺
+        // onPause／onHostPause 之前行，所以個 flag 一定趕得切。
         // （v2.4 之前呢度係 inline hide 個 ControlsContainerView，
         // 而家搬咗入 morpheSetPipUiHidden，連 nav bar 一齊處理。）
         // Register 分析（已核實）：呢個 method 一共用 3 個 register，
         // v2 = this；開頭 v0 未用過，借嚟裝 boolean（true = 1）。
         // 之後 v0 會俾 SDK 檢查覆寫，唔會有衝突。
+        // 注意 if 指令嘅語義：if-nez = jump if != 0；if-eqz = jump if == 0。
+        // 「flag 係 true（v0 != 0）就跳去 skip pause」要用 if-nez。
         ReactJWPlayerViewOnHostPauseFingerprint.method.apply {
             addInstructionsWithLabels(
                 0,
@@ -537,6 +625,8 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     sget v0, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
                     const/16 v1, 0x1a
                     if-lt v0, v1, :pip_orig
+                    sget-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
+                    if-nez v0, :pip_skip_pause
                     iget-object v0, v2, Lcom/viutv/ReactJWPlayerView;->reactContext:Lcom/facebook/react/bridge/ReactContext;
                     invoke-virtual {v0}, Lcom/facebook/react/bridge/ReactContext;->getCurrentActivity()Landroid/app/Activity;
                     move-result-object v0
@@ -544,6 +634,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-virtual {v0}, Landroid/app/Activity;->isInPictureInPictureMode()Z
                     move-result v1
                     if-eqz v1, :pip_orig
+                    :pip_skip_pause
                     return-void
                     :pip_orig
                     nop
@@ -551,8 +642,12 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             )
         }
 
-        // Hook 4: onHostResume -> 還原返隱藏咗嘅 UI，再 refresh 個 player view，
-        // 等 PiP 返出嚟畫面唔好凍住。
+        // Hook 4: onHostResume -> 清返 morpheUserLeaving flag，還原返隱藏咗嘅 UI，
+        // 再 refresh 個 player view，等 PiP 返出嚟畫面唔好凍住。
+        // 清 flag（v2.5）：將 morpheUserLeaving set 返 false，等下次撳 Home
+        // 嗰陣 onUserLeaveHint 再 set 過。呢個同 morpheSetPipUiHidden(false)
+        // 共用同一個 const/4 v0, 0x0——v0 = 0 先 sput-boolean 清 flag，
+        // 再用同一個 v0（仲係 0）做 morpheSetPipUiHidden 嘅 false 參數。
         // 還原（morpheSetPipUiHidden(false)）：將入 PiP 嗰陣隱藏咗嘅
         // nav bar／功能制逐個 set 返 VISIBLE。呢個唔係 v2.3 嗰句強制
         // setVisibility(VISIBLE)——嗰句係無條件將成個 container 顯示返，
@@ -596,7 +691,27 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                 0,
                 """
                     const/4 v0, 0x0
+                    sput-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
                     invoke-virtual {v2, v0}, Lcom/viutv/ReactJWPlayerView;->morpheSetPipUiHidden(Z)V
+                """
+            )
+        }
+
+        // Hook 5 (v2.5): ReactActivity.onUserLeaveHint -> set morpheUserLeaving flag。
+        // 撳 Home／離開 activity 嗰陣，framework 一定會喺 onPause／onHostPause
+        // 之前 call onUserLeaveHint。MainActivity 繼承 ReactActivity，MainActivity
+        // 自己無 override onUserLeaveHint，所以行嘅係 ReactActivity 呢個。
+        // 喺 method 開頭將 ReactJWPlayerView 嗰個 static flag set 做 true，
+        // 等 Hook 3（onHostPause）嗰陣就算 PiP state 仲未落地，都識得 skip pause。
+        // 之後原本嘅 super call＋delegate call 照行，唔會影響 React Native 嗰邊。
+        // Register 分析（已核實）：呢個 method 一共用 2 個 register，
+        // v1 = this，v0 係 local；position 0 嗰陣 v0 未用過，借嚟裝 true（1）。
+        ReactActivityOnUserLeaveHintFingerprint.method.apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    const/4 v0, 0x1
+                    sput-boolean v0, Lcom/viutv/ReactJWPlayerView;->morpheUserLeaving:Z
                 """
             )
         }
