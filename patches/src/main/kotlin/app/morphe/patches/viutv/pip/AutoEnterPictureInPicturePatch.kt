@@ -249,6 +249,36 @@ import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
  * 有無行、行嗰陣 isInPiP 係咪 true。如果係，v2.8 就可以喺呢度
  * resume 個 player（setPlay(true)）；如果唔係，就要搵第二個 signal。
  * v2.7 淨係加 log，唔改任何行為（唔 resume）。
+ *
+ * v2.7 diagnostic 結果（2026-11-11 21:23，用戶交 pip-home__2.log，
+ * 主機 tag 19）：
+ * 入 PiP 嗰陣 onConfigurationChanged 真係有行，而且行嗰陣
+ * isInPictureInPictureMode() 係 true。時間線：21:22:15.933
+ * onHostPause（flag=false、isInPiP=false→setPlay(false) 照停）
+ * →21:22:15.968 onPause→21:22:16.052 onConfigurationChanged
+ * （isInPiP=true）。即係入 PiP 之後大約 0.12 秒，onConfigurationChanged
+ * 就會行，而且嗰陣已經入咗 PiP——呢個係一個有效嘅「入咗 PiP」
+ * signal，v2.8 可以喺呢度 resume。
+ *
+ * v2.8（2026-11-11，用戶批准之後）：
+ * 喺 Hook 6（MainActivity.onConfigurationChanged）嗰度，isInPiP
+ * 係 true 嗰陣 resume 返個 player。設計：
+ * 1) 新加一個 public static field morphePlayerView（ReactJWPlayerView），
+ *    喺 Hook 1（onPlay）嗰度 set 做 this——onPlay 一定喺入 PiP 之前
+ *    行過（auto-enter 係喺 onPlay 嗰度開嘅），所以個 field 一定有值。
+ * 2) 新加一個 public method morpheResumePlayer()（喺 ReactJWPlayerView），
+ *    入面 call private setPlay(true)。點解要 wrapper：setPlay 係
+ *    private（access 0x2，已核實），MainActivity（另一個 class）
+ *    唔可以直接 call 佢，否則 runtime 會 IllegalAccessError；wrapper
+ *    同 setPlay 係同一個 class，call 到。setPlay(true) 嗰陣 player
+ *    已經播緊就係 no-op，所以唔使再 check 狀態。
+ * 3) Hook 6 喺印完 isInPiP 之後再讀多次 isInPiP（因為印 log 嗰陣
+ *    已經將個 boolean 轉咗做字串），true 嘅話就攞 morphePlayerView，
+ *    唔係 null 就 call morpheResumePlayer()。false 或者 null 就
+ *    乜都唔做，照行原本嘅 super＋broadcast。
+ * 預期效果：撳 Home 之後條片會停大約 0.12 秒（onHostPause 嗰陣照
+ * pause），跟住入咗 PiP 嗰陣 onConfigurationChanged 就 resume 返。
+ * 嗰一下短暫停頓係預期之內，唔係 bug。
  */
 /**
  * 喺 ReactJWPlayerView 加一個 helper method：
@@ -389,6 +419,34 @@ private fun addMorpheUserLeavingField() {
 }
 
 /**
+ * 喺 ReactJWPlayerView 加一個 public static field：
+ *   public static ReactJWPlayerView morphePlayerView
+ *
+ * v2.8（2026-11-11）：用嚟等 MainActivity.onConfigurationChanged
+ * （Hook 6，另一個 class）喺入咗 PiP 嗰陣搵返而家嗰個 player view
+ * 去 resume。Hook 1（onPlay）嗰度 set 佢做 this——onPlay 一定喺
+ * 入 PiP 之前行過，所以個 field 一定有值；每次 onPlay 都會再 set
+ * 過，idempotent。一定要 public static：讀佢嗰個係 MainActivity。
+ * Static object field 預設值係 null，唔使 static initializer；
+ * Hook 6 讀嗰陣會 check null。
+ */
+private fun addMorphePlayerViewField() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").apply {
+        fields.add(
+            ImmutableField(
+                "Lcom/viutv/ReactJWPlayerView;",
+                "morphePlayerView",
+                "Lcom/viutv/ReactJWPlayerView;",
+                AccessFlags.PUBLIC.value or AccessFlags.STATIC.value,
+                null,
+                null,
+                null
+            ).toMutable()
+        )
+    }
+}
+
+/**
  * 喺 ReactJWPlayerView 加一個 public static helper method：
  *   public static morpheLog(String msg)
  *
@@ -415,6 +473,43 @@ private fun addMorpheLogMethod() {
                 """
                     const-string v0, "REACT_JWPLAYER_VIEW"
                     invoke-static {v0, p0}, Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+                    return-void
+                """
+            )
+        }
+    )
+}
+
+/**
+ * 喺 ReactJWPlayerView 加一個 helper method：
+ *   public morpheResumePlayer()
+ *
+ * v2.8（2026-11-11）：等 MainActivity.onConfigurationChanged（Hook 6，
+ * 另一個 class）喺入咗 PiP 嗰陣 resume 返個 player。入面淨係 call
+ * private setPlay(true)——setPlay 係 private（access 0x2，已核實），
+ * MainActivity 唔可以直接 call 佢，否則 runtime 會 IllegalAccessError；
+ * 呢個 wrapper 同 setPlay 係同一個 class，call 到。一定要 public：
+ * call 佢嗰個係 MainActivity。setPlay(true) 嗰陣 player 已經播緊
+ * 就係 no-op，所以唔使再 check 狀態。
+ * Register：1 個（v0 local 裝 true，p0 = this）。
+ */
+private fun addMorpheResumePlayerMethod() {
+    mutableClassDefBy("Lcom/viutv/ReactJWPlayerView;").methods.add(
+        ImmutableMethod(
+            "Lcom/viutv/ReactJWPlayerView;",
+            "morpheResumePlayer",
+            listOf(),
+            "V",
+            AccessFlags.PUBLIC.value,
+            null,
+            null,
+            MutableMethodImplementation(2),
+        ).toMutable().apply {
+            addInstructionsWithLabels(
+                0,
+                """
+                    const/4 v0, 0x1
+                    invoke-virtual {p0, v0}, Lcom/viutv/ReactJWPlayerView;->setPlay(Z)V
                     return-void
                 """
             )
@@ -648,16 +743,23 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
     execute {
         // 先加 helper method（Hook 1 會 call 佢）同埋 v2.4 嘅 field＋helper、
         // v2.5 嘅 static flag field（Hook 5 會 set 佢，Hook 3 會讀佢），
-        // v2.6 嘅 log helper（Hook 5 同 Hook 3 會 call 佢印 diagnostic）。
+        // v2.6 嘅 log helper（Hook 5 同 Hook 3 會 call 佢印 diagnostic），
+        // v2.8 嘅 static player field（Hook 1 會 set 佢，Hook 6 會讀佢）
+        // 同 resume wrapper（Hook 6 會 call 佢）。
         addMorpheUpdatePipParamsMethod()
         addMorpheHiddenViewsField()
         addMorpheSetPipUiHiddenMethod()
         addMorpheUserLeavingField()
         addMorpheLogMethod()
+        addMorphePlayerViewField()
+        addMorpheResumePlayerMethod()
 
-        // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect）。
+        // Hook 1: onPlay -> 開 auto-enter（經 helper：16:9 + source rect），
+        // 再將呢個 view 記入 static morphePlayerView，等 Hook 6（另一個
+        // class）入咗 PiP 嗰陣搵返佢去 resume。
         // Register 分析（已核實）：呢個 method 一共用 6 個 register，
         // v4 = this，v0 借嚟裝 activity；call 完 helper 就唔再用 v0。
+        // sput-object 嗰句用 v4（this），唔掂 v0，唔會同上面嗰段衝突。
         ReactJWPlayerViewOnPlayFingerprint.method.apply {
             val playingIndex = indexOfFirstInstructionOrThrow(
                 methodCall(
@@ -674,6 +776,7 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     if-eqz v0, :pip_done
                     invoke-virtual {v4, v0}, Lcom/viutv/ReactJWPlayerView;->morpheUpdatePipParams(Landroid/app/Activity;)V
                     :pip_done
+                    sput-object v4, Lcom/viutv/ReactJWPlayerView;->morphePlayerView:Lcom/viutv/ReactJWPlayerView;
                     nop
                 """
             )
@@ -846,17 +949,27 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
             )
         }
 
-        // Hook 6 (v2.7 diagnostic): MainActivity.onConfigurationChanged ->
-        // 印 isInPictureInPictureMode() 嘅值。
-        // 用途：核實入 PiP 嗰陣 onConfigurationChanged 有無行、行嗰陣
-        // isInPiP 係咪 true。如果係，v2.8 就可以喺呢度 resume 個 player。
-        // v2.7 淨係印 log，唔 resume、唔改任何行為。
+        // Hook 6 (v2.7 diagnostic, v2.8 變做 fix): MainActivity
+        // .onConfigurationChanged -> 入咗 PiP 嗰陣 resume 返個 player。
+        // v2.7 diagnostic（2026-11-11）：主機 log 證實入 PiP 嗰陣
+        // onConfigurationChanged 真係有行，而且行嗰陣 isInPiP 係 true
+        // （pip-home__2.log：onHostPause 21:22:15.933→onPause 21:22:15.968
+        // →onConfigurationChanged 21:22:16.052，isInPiP=true）。
+        // v2.8：喺印完 log 之後再讀多次 isInPiP（因為印 log 嗰陣已經
+        // 將個 boolean 轉咗做字串），true 嘅話就攞 static morphePlayerView，
+        // 唔係 null 就 call morpheResumePlayer()（經 public wrapper，
+        // 入面 call private setPlay(true)）。false 或者 null 就乜都唔做，
+        // 照行原本嘅 super＋broadcast。
+        // 預期：撳 Home 之後條片會停大約 0.12 秒（onHostPause 嗰陣照
+        // pause），跟住入咗 PiP 嗰陣 onConfigurationChanged 就 resume 返。
         // Register 分析（已核實）：呢個 method 一共用 4 個 register，
         // v2 = this，v3 = Configuration 參數；position 0 嗰陣 v0、v1
         // 未用過。v0 裝 isInPiP boolean，之後轉做字串；v1 裝 label 字串。
-        // 之後原本嘅 code 會再用 v0／v1 做 Intent，嗰陣我哋啲值已經死晒，
-        // 唔會有衝突。isInPictureInPictureMode() 係 Activity 嘅 method，
-        // 所以 invoke 嗰陣用 Landroid/app/Activity 呢個 class。
+        // Resume 嗰段再讀多次 isInPiP 入 v0，之後 v0 轉做 player view
+        // （sget-object）。之後原本嘅 code 會再用 v0／v1 做 Intent，
+        // 嗰陣我哋啲值已經死晒，唔會有衝突。isInPictureInPictureMode()
+        // 係 Activity 嘅 method，所以 invoke 嗰陣用 Landroid/app/Activity
+        // 呢個 class。
         MainActivityOnConfigurationChangedFingerprint.method.apply {
             addInstructionsWithLabels(
                 0,
@@ -868,6 +981,14 @@ val autoEnterPictureInPicturePatch = bytecodePatch(
                     invoke-static {v0}, Ljava/lang/String;->valueOf(Z)Ljava/lang/String;
                     move-result-object v0
                     invoke-static {v0}, Lcom/viutv/ReactJWPlayerView;->morpheLog(Ljava/lang/String;)V
+                    invoke-virtual {v2}, Landroid/app/Activity;->isInPictureInPictureMode()Z
+                    move-result v0
+                    if-eqz v0, :pip_resume_done
+                    sget-object v0, Lcom/viutv/ReactJWPlayerView;->morphePlayerView:Lcom/viutv/ReactJWPlayerView;
+                    if-eqz v0, :pip_resume_done
+                    invoke-virtual {v0}, Lcom/viutv/ReactJWPlayerView;->morpheResumePlayer()V
+                    :pip_resume_done
+                    nop
                 """
             )
         }
